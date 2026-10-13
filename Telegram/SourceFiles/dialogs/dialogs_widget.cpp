@@ -1707,7 +1707,7 @@ void Widget::setupMobileBottomBar() {
 			not_null<Window::SessionController*> controller)
 		: Ui::RpWidget(parent)
 		, _controller(controller)
-		, _scroll(this, st::dialogsScroll)
+		, _scroll(this, st::defaultSolidScroll)
 		, _search(this, st::dialogsFilter, tr::lng_dlg_filter())
 		, _listController(&controller->session()) {
 			_listController.setStyleOverrides(&st::contactsWithStories);
@@ -1731,11 +1731,12 @@ void Widget::setupMobileBottomBar() {
 				layout->resizeToWidth(w);
 			}, _scroll->lifetime());
 
-			QObject::connect(_search.data(), &Ui::InputField::changed, [=] {
+			_search->changes(
+			) | rpl::on_next([=] {
 				if (_listContent) {
 					_listContent->searchQueryChanged(_search->getLastText());
 				}
-			});
+			}, _search->lifetime());
 		}
 
 	protected:
@@ -1831,7 +1832,7 @@ void Widget::setupMobileBottomBar() {
 			not_null<Window::SessionController*> controller)
 		: Ui::RpWidget(parent)
 		, _controller(controller)
-		, _scroll(this, st::dialogsScroll)
+		, _scroll(this, st::defaultSolidScroll)
 		, _callsController(controller)
 		, _groupCallsController(controller) {
 			const auto layout = _scroll->setOwnedWidget(
