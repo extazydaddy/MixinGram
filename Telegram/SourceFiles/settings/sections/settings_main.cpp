@@ -143,7 +143,8 @@ Cover::Cover(
 	parent,
 	st::settingsPhotoTop
 		+ st::infoProfileCover.photo.size.height()
-		+ st::settingsPhotoBottom)
+		+ st::settingsPhotoBottom
+		+ style::ConvertScale(64))
 , _controller(controller)
 , _user(user)
 , _badge(
@@ -245,7 +246,7 @@ void Cover::setupChildGeometry() {
 	widthValue(
 	) | rpl::on_next([=](int newWidth) {
 		_userpic->moveToLeft(
-			st::settingsPhotoLeft,
+			std::max(0, (newWidth - _userpic->width()) / 2),
 			st::settingsPhotoTop,
 			newWidth);
 		refreshNameGeometry(newWidth);
@@ -304,19 +305,18 @@ void Cover::initViewers() {
 }
 
 void Cover::refreshNameGeometry(int newWidth) {
-	const auto nameLeft = st::settingsNameLeft;
-	const auto nameTop = st::settingsNameTop;
-	const auto qrButtonWidth = (_qrButton && !_qrButton->isHidden())
-		? (_qrButton->width() + st::infoProfileCover.rightSkip)
+	const auto nameTop = st::settingsPhotoTop
+		+ _userpic->height()
+		+ style::ConvertScale(10);
+	const auto badgeWidth = _badge.widget()
+		? (st::infoVerifiedCheckPosition.x() + _badge.widget()->width())
 		: 0;
-	auto nameWidth = newWidth
-		- nameLeft
-		- st::infoProfileCover.rightSkip
-		- qrButtonWidth;
-	if (const auto width = _badge.widget() ? _badge.widget()->width() : 0) {
-		nameWidth -= st::infoVerifiedCheckPosition.x() + width;
-	}
-	_name->resizeToNaturalWidth(nameWidth);
+	const auto maxWidth = std::max(
+		style::ConvertScale(60),
+		newWidth - 2 * st::infoProfileCover.rightSkip - badgeWidth);
+	_name->resizeToNaturalWidth(maxWidth);
+	const auto totalWidth = _name->width() + badgeWidth;
+	const auto nameLeft = std::max(0, (newWidth - totalWidth) / 2);
 	_name->moveToLeft(nameLeft, nameTop, newWidth);
 	const auto badgeLeft = nameLeft + _name->width();
 	const auto badgeTop = nameTop;
@@ -335,21 +335,26 @@ void Cover::updatePhoneText() {
 }
 
 void Cover::refreshPhoneGeometry(int newWidth) {
-	const auto phoneLeft = st::settingsPhoneLeft;
-	const auto phoneTop = st::settingsPhoneTop;
-	const auto phoneWidth = newWidth
-		- phoneLeft
-		- st::infoProfileCover.rightSkip;
-	_phone->resizeToWidth(phoneWidth);
+	const auto phoneTop = st::settingsPhotoTop
+		+ _userpic->height()
+		+ style::ConvertScale(34);
+	const auto maxWidth = std::max(
+		style::ConvertScale(60),
+		newWidth - 2 * st::infoProfileCover.rightSkip);
+	_phone->resizeToNaturalWidth(maxWidth);
+	const auto phoneLeft = std::max(0, (newWidth - _phone->width()) / 2);
 	_phone->moveToLeft(phoneLeft, phoneTop, newWidth);
 }
 
 void Cover::refreshUsernameGeometry(int newWidth) {
-	const auto usernameLeft = st::settingsUsernameLeft;
-	const auto usernameTop = st::settingsUsernameTop;
-	const auto usernameRight = st::infoProfileCover.rightSkip;
-	const auto usernameWidth = newWidth - usernameLeft - usernameRight;
-	_username->resizeToWidth(usernameWidth);
+	const auto usernameTop = st::settingsPhotoTop
+		+ _userpic->height()
+		+ style::ConvertScale(54);
+	const auto maxWidth = std::max(
+		style::ConvertScale(60),
+		newWidth - 2 * st::infoProfileCover.rightSkip);
+	_username->resizeToNaturalWidth(maxWidth);
+	const auto usernameLeft = std::max(0, (newWidth - _username->width()) / 2);
 	_username->moveToLeft(usernameLeft, usernameTop, newWidth);
 }
 
@@ -357,7 +362,7 @@ void Cover::refreshQrButtonGeometry(int newWidth) {
 	if (!_qrButton) {
 		return;
 	}
-	const auto buttonTop = (height() - _qrButton->height()) / 2;
+	const auto buttonTop = st::settingsPhotoTop;
 	const auto buttonRight = st::infoProfileCover.rightSkip;
 	const auto inset = st::infoProfileLabeledButtonQrInset;
 	_qrButton->moveToRight(buttonRight - inset, buttonTop, newWidth);

@@ -1317,7 +1317,7 @@ void Settings::addFromSerialized(const QByteArray &serialized) {
 	_skipToastsInFocus = (skipToastsInFocus == 1);
 	_recordVideoMessages = (recordVideoMessages == 1);
 	_videoQuality = DeserializeVideoQuality(videoQuality);
-	_chatFiltersHorizontal = (chatFiltersHorizontal == 1);
+	_chatFiltersHorizontal = true;
 	_quickDialogAction = Dialogs::Ui::QuickDialogAction(quickDialogAction);
 	_notificationsVolume = notificationsVolume;
 }
@@ -1772,7 +1772,7 @@ void Settings::resetOnLastLogout() {
 	_ivZoom = 0;
 	_recordVideoMessages = false;
 	_videoQuality = {};
-	_chatFiltersHorizontal = false;
+	_chatFiltersHorizontal = true;
 	_chatFiltersTabsMode = Ui::ChatsFiltersTabsMode::Default;
 	_pullToNextChannel = true;
 	_quickDialogAction = Dialogs::Ui::QuickDialogAction::Disabled;

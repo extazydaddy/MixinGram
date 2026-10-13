@@ -95,15 +95,20 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "info/profile/info_profile_values.h"
 #include "info/info_memento.h"
 #include "inline_bots/bot_attach_web_view.h"
+#include "boxes/peer_list_controllers.h"
+#include "calls/calls_box_controller.h"
+#include "settings/sections/settings_main.h"
 #include "styles/style_dialogs.h"
 #include "styles/style_chat.h"
 #include "styles/style_chat_helpers.h"
 #include "styles/style_dialogs_widget.h"
 #include "styles/style_info.h"
+#include "styles/style_menu_icons.h"
 #include "styles/style_window.h"
 #include "base/qt/qt_common_adapters.h"
 
 #include <QtCore/QMimeData>
+#include <QtGui/QPainterPath>
 #include <QtGui/QTextBlock>
 #include <QtWidgets/QScrollBar>
 #include <QtWidgets/QTextEdit>
@@ -448,6 +453,15 @@ Widget::Widget(
 			_childListPeerId.value(),
 			_childListShown.value(),
 			makeChildListShown)));
+	if (_layout == Layout::Main) {
+		const auto bottomBarSpacer = _innerList->add(
+			object_ptr<Ui::FixedHeightWidget>(
+				_innerList,
+				style::ConvertScale(68)));
+		bottomBarSpacer->paintOn([=](QPainter &p) {
+			p.fillRect(bottomBarSpacer->rect(), st::dialogsBg);
+		});
+	}
 	controller->activeChatsFilter(
 	) | rpl::on_next([=](FilterId id) {
 		switchToChatsFilter(id);
@@ -1642,9 +1656,12 @@ void Widget::startScrollUpButtonAnimation(bool shown) {
 
 void Widget::updateScrollUpPosition() {
 	// _scrollToTop is a child widget of _scroll, not me.
+	const auto bottomBarOffset = (_mobileBottomBar && !_mobileBottomBar->isHidden())
+		? (_mobileBottomBar->height() + style::ConvertScale(10))
+		: 0;
 	auto top = anim::interpolate(
 		0,
-		_scrollToTop->height() + st::connectingMargin.top(),
+		_scrollToTop->height() + st::connectingMargin.top() + bottomBarOffset,
 		_scrollToTopShown.value(_scrollToTopIsShown ? 1. : 0.));
 	_scrollToTop->moveToRight(
 		st::historyToDownPosition.x(),
@@ -1672,6 +1689,379 @@ void Widget::setupSupportMode() {
 	) | rpl::to_empty);
 }
 
+void Widget::setupMobileBottomBar() {
+	if (_layout != Layout::Main) {
+		return;
+	}
+
+	class MobileBottomBar final : public Ui::RpWidget {
+	public:
+		MobileBottomBar(
+			QWidget *parent,
+			not_null<Window::SessionController*> controller,
+			Fn<void()> onChats,
+			Fn<void()> onMainMenu)
+		: Ui::RpWidget(parent)
+		, _controller(controller)
+		, _onChats(std::move(onChats))
+		, _onMainMenu(std::move(onMainMenu)) {
+			setMouseTracking(true);
+			setCursor(style::cur_pointer);
+
+			const auto updateUnread = [=] {
+				const auto state = _controller->session().data().chatsList()->unreadState();
+				const auto count = std::max(0, state.chats);
+				if (_unreadChats != count) {
+					_unreadChats = count;
+					update();
+				}
+			};
+			updateUnread();
+			_controller->session().data().chatsList()->unreadStateChanges(
+			) | rpl::on_next([=](const Dialogs::UnreadState &) {
+				updateUnread();
+			}, lifetime());
+
+			Window::OtherAccountsUnreadState(
+				&_controller->session().account()
+			) | rpl::on_next([=](const Window::OthersUnreadState &state) {
+				if (_otherAccountsUnread != state.count) {
+					_otherAccountsUnread = state.count;
+					update();
+				}
+			}, lifetime());
+
+			_controller->session().changes().peerUpdates(
+				_controller->session().user(),
+				Data::PeerUpdate::Flag::Photo
+			) | rpl::on_next([=] {
+				update();
+			}, lifetime());
+
+			style::PaletteChanged() | rpl::on_next([=] {
+				update();
+			}, lifetime());
+		}
+
+	protected:
+		void paintEvent(QPaintEvent *) override {
+			Painter p(this);
+			PainterHighQualityEnabler hq(p);
+
+			const auto w = float64(width());
+			const auto h = float64(height());
+			if (w <= 20. || h <= 16.) {
+				return;
+			}
+
+			const auto pillRect = QRectF(
+				style::ConvertScale(2),
+				style::ConvertScale(2),
+				w - style::ConvertScale(4),
+				h - style::ConvertScale(5));
+			const auto radius = pillRect.height() / 2.0;
+
+			// Soft floating elevation shadow.
+			p.setPen(Qt::NoPen);
+			p.setBrush(QColor(0, 0, 0, 14));
+			p.drawRoundedRect(pillRect.adjusted(-1., 1., 1., 3.), radius + 1., radius + 1.);
+			p.setBrush(QColor(0, 0, 0, 24));
+			p.drawRoundedRect(pillRect.adjusted(0., 1., 0., 2.), radius, radius);
+
+			// Frosted pill background & subtle border.
+			auto pillBg = st::dialogsBg->c;
+			pillBg.setAlpha(246);
+			p.setBrush(pillBg);
+			auto borderColor = st::windowSubTextFg->c;
+			borderColor.setAlpha(38);
+			p.setPen(QPen(borderColor, 1.0));
+			p.drawRoundedRect(pillRect, radius, radius);
+
+			const auto innerRect = pillRect.adjusted(
+				style::ConvertScale(4),
+				style::ConvertScale(3),
+				-style::ConvertScale(4),
+				-style::ConvertScale(3));
+			const auto tabWidth = innerRect.width() / 4.0;
+
+			const QString labels[4] = {
+				tr::lng_menu_contacts(tr::now),
+				tr::lng_menu_calls(tr::now),
+				tr::lng_filters_edit_chats(tr::now),
+				tr::lng_settings_color_tab_profile(tr::now),
+			};
+
+			auto labelFont = st::dialogsTextFont->f;
+			labelFont.setPixelSize(style::ConvertScale(11));
+			labelFont.setWeight(QFont::DemiBold);
+
+			for (int i = 0; i < 4; ++i) {
+				const auto tabRect = QRectF(
+					innerRect.left() + i * tabWidth,
+					innerRect.top(),
+					tabWidth,
+					innerRect.height());
+				const auto tabRadius = tabRect.height() / 2.0;
+				const auto isActive = (_activeTab == i);
+				const auto isHovered = (_hoveredTab == i);
+
+				if (isActive) {
+					auto activeBg = st::windowBgActive->c;
+					activeBg.setAlpha(38);
+					p.setPen(Qt::NoPen);
+					p.setBrush(activeBg);
+					p.drawRoundedRect(tabRect, tabRadius, tabRadius);
+				} else if (isHovered) {
+					auto hoverBg = st::windowSubTextFg->c;
+					hoverBg.setAlpha(18);
+					p.setPen(Qt::NoPen);
+					p.setBrush(hoverBg);
+					p.drawRoundedRect(tabRect, tabRadius, tabRadius);
+				}
+
+				const auto fg = isActive
+					? st::windowBgActive->c
+					: st::windowSubTextFg->c;
+
+				const auto iconSize = style::ConvertScale(22);
+				const auto iconX = tabRect.center().x() - iconSize / 2.0;
+				const auto iconY = tabRect.top() + style::ConvertScale(4);
+				const auto cx = tabRect.center().x();
+				const auto cy = iconY + iconSize / 2.0;
+
+				if (i == 0) {
+					// Mobile Telegram Contacts icon: filled circle with person cutout.
+					const auto r = style::ConvertScaleExact(10.0);
+					QPainterPath circle;
+					circle.addEllipse(QPointF(cx, cy), r, r);
+
+					QPainterPath person;
+					const auto headR = style::ConvertScaleExact(3.3);
+					person.addEllipse(
+						QPointF(cx, cy - style::ConvertScaleExact(2.6)),
+						headR,
+						headR);
+					const auto bodyW = style::ConvertScaleExact(11.6);
+					const auto bodyH = style::ConvertScaleExact(9.0);
+					person.addEllipse(
+						QRectF(
+							cx - bodyW / 2.0,
+							cy + style::ConvertScaleExact(2.0),
+							bodyW,
+							bodyH));
+
+					p.setPen(Qt::NoPen);
+					p.setBrush(fg);
+					p.drawPath(circle.subtracted(person));
+				} else if (i == 1) {
+					// Calls handset icon.
+					st::menuIconPhone.paintInCenter(
+						p,
+						QRect(int(iconX), int(iconY), iconSize, iconSize),
+						fg);
+				} else if (i == 2) {
+					// Mobile Telegram Chats icon: two overlapping rounded chat bubbles.
+					const auto bw = style::ConvertScaleExact(14.5);
+					const auto bh = style::ConvertScaleExact(11.5);
+					const auto br = style::ConvertScaleExact(4.5);
+
+					// Back bubble (top-right).
+					QPainterPath backBubble;
+					backBubble.addRoundedRect(
+						QRectF(
+							cx - style::ConvertScaleExact(5.0),
+							cy - style::ConvertScaleExact(8.5),
+							bw,
+							bh),
+						br,
+						br);
+
+					// Front bubble (bottom-left) + cutout gap around it.
+					const auto frontRect = QRectF(
+						cx - style::ConvertScaleExact(9.5),
+						cy - style::ConvertScaleExact(4.0),
+						bw,
+						bh);
+					QPainterPath frontCutout;
+					frontCutout.addRoundedRect(
+						frontRect.adjusted(
+							-style::ConvertScaleExact(1.4),
+							-style::ConvertScaleExact(1.4),
+							style::ConvertScaleExact(1.4),
+							style::ConvertScaleExact(1.4)),
+						br + 1.0,
+						br + 1.0);
+
+					QPainterPath frontBubble;
+					frontBubble.addRoundedRect(frontRect, br, br);
+					QPainterPath tail;
+					tail.moveTo(frontRect.left() + style::ConvertScaleExact(2.0), frontRect.bottom() - style::ConvertScaleExact(2.0));
+					tail.lineTo(frontRect.left() - style::ConvertScaleExact(1.5), frontRect.bottom() + style::ConvertScaleExact(2.0));
+					tail.lineTo(frontRect.left() + style::ConvertScaleExact(6.0), frontRect.bottom() - style::ConvertScaleExact(0.5));
+					tail.closeSubpath();
+					frontBubble = frontBubble.united(tail);
+
+					p.setPen(Qt::NoPen);
+					p.setBrush(fg);
+					p.drawPath(backBubble.subtracted(frontCutout));
+					p.drawPath(frontBubble);
+
+					if (_unreadChats > 0) {
+						const auto badgeText = (_unreadChats > 99)
+							? u"99+"_q
+							: QString::number(_unreadChats);
+						auto badgeFont = labelFont;
+						badgeFont.setPixelSize(style::ConvertScale(10));
+						badgeFont.setWeight(QFont::Bold);
+						p.setFont(badgeFont);
+						const QFontMetrics fm(badgeFont);
+						const auto bwBadge = std::max(
+							style::ConvertScale(16),
+							fm.horizontalAdvance(badgeText) + style::ConvertScale(8));
+						const auto bhBadge = style::ConvertScale(15);
+						const auto badgeRect = QRectF(
+							cx + style::ConvertScale(2),
+							iconY - style::ConvertScale(2),
+							bwBadge,
+							bhBadge);
+						p.setPen( QPen(pillBg, style::ConvertScaleExact(1.5)) );
+						p.setBrush(st::windowBgActive->c);
+						p.drawRoundedRect(badgeRect, bhBadge / 2.0, bhBadge / 2.0);
+						p.setPen(st::windowFgActive->c);
+						p.drawText(badgeRect, Qt::AlignCenter, badgeText);
+					}
+				} else if (i == 3) {
+					// Profile tab: user's circular avatar.
+					const auto user = _controller->session().user();
+					const auto avatarSize = style::ConvertScale(22);
+					const auto ax = int( std::round(cx - avatarSize / 2.0) );
+					const auto ay = int( std::round(iconY) );
+					user->paintUserpic(
+						p,
+						_userpicView,
+						ax,
+						ay,
+						avatarSize,
+						true);
+					if (isActive) {
+						p.setBrush(Qt::NoBrush);
+						p.setPen(QPen(fg, style::ConvertScaleExact(1.6)));
+						p.drawEllipse(
+							QRectF(ax - 1.5, ay - 1.5, avatarSize + 3.0, avatarSize + 3.0));
+					}
+					if (_otherAccountsUnread > 0) {
+						const auto dotSize = style::ConvertScale(8);
+						p.setPen(QPen(pillBg, style::ConvertScaleExact(1.5)));
+						p.setBrush(st::windowBgActive->c);
+						p.drawEllipse(
+							QRectF(
+								ax + avatarSize - dotSize / 2.0,
+								ay - style::ConvertScale(1),
+								dotSize,
+								dotSize));
+					}
+				}
+
+				// Tab text label.
+				p.setFont(labelFont);
+				p.setPen(fg);
+				const auto textRect = QRectF(
+					tabRect.left() + style::ConvertScale(2),
+					iconY + iconSize + style::ConvertScale(1),
+					tabRect.width() - style::ConvertScale(4),
+					tabRect.bottom() - (iconY + iconSize));
+				p.drawText(textRect, Qt::AlignHCenter | Qt::AlignTop, labels[i]);
+			}
+		}
+
+		void mouseMoveEvent(QMouseEvent *e) override {
+			const auto tab = tabAt(e->pos());
+			if (_hoveredTab != tab) {
+				_hoveredTab = tab;
+				update();
+			}
+		}
+
+		void leaveEventHook(QEvent *) override {
+			if (_hoveredTab != -1) {
+				_hoveredTab = -1;
+				update();
+			}
+		}
+
+		void mousePressEvent(QMouseEvent *e) override {
+			if (e->button() == Qt::RightButton) {
+				if (_onMainMenu) {
+					_onMainMenu();
+				}
+				return;
+			}
+			if (e->button() != Qt::LeftButton) {
+				return;
+			}
+			const auto tab = tabAt(e->pos());
+			if (tab < 0 || tab > 3) {
+				return;
+			}
+			if (tab == 0) {
+				_activeTab = 2;
+				update();
+				_controller->show(PrepareContactsBox(_controller));
+			} else if (tab == 1) {
+				_activeTab = 2;
+				update();
+				::Calls::ShowCallsBox(_controller);
+			} else if (tab == 2) {
+				_activeTab = 2;
+				update();
+				if (_onChats) {
+					_onChats();
+				}
+			} else if (tab == 3) {
+				_activeTab = 2;
+				update();
+				_controller->showSettings(Settings::MainId());
+			}
+		}
+
+	private:
+		[[nodiscard]] int tabAt(QPoint pos) const {
+			const auto w = width();
+			if (w <= 0 || !rect().contains(pos)) {
+				return -1;
+			}
+			const auto idx = int((pos.x() * 4) / std::max(1, w));
+			return std::clamp(idx, 0, 3);
+		}
+
+		const not_null<Window::SessionController*> _controller;
+		Fn<void()> _onChats;
+		Fn<void()> _onMainMenu;
+		Ui::PeerUserpicView _userpicView;
+		int _activeTab = 2;
+		int _hoveredTab = -1;
+		int _unreadChats = 0;
+		int _otherAccountsUnread = 0;
+	};
+
+	_mobileBottomBar.reset(Ui::CreateChild<MobileBottomBar>(
+		this,
+		controller(),
+		[=] {
+			controller()->window().hideSettingsAndLayer();
+			if (_searchHasFocus || !_search->getLastText().isEmpty() || _openedFolder) {
+				escape();
+			} else {
+				jumpToTop();
+			}
+		},
+		[=] {
+			showMainMenu();
+		}));
+	_mobileBottomBar->show();
+	_mobileBottomBar->raise();
+}
+
 void Widget::setupMainMenuToggle() {
 	_mainMenu.under->setClickedCallback([=] {
 		_mainMenu.toggle->clicked({}, Qt::LeftButton);
@@ -1681,13 +2071,14 @@ void Widget::setupMainMenuToggle() {
 	_mainMenu.toggle->setIsMenuButton(true);
 	_mainMenu.toggle->setAccessibleName(tr::lng_main_menu(tr::now));
 
+	setupMobileBottomBar();
+
 	rpl::single(rpl::empty) | rpl::then(
 		controller()->filtersMenuChanged()
 	) | rpl::on_next([=] {
-		const auto filtersHidden = !controller()->filtersWidth();
-		_mainMenu.toggle->setVisible(filtersHidden);
-		_mainMenu.under->setVisible(filtersHidden);
-		_searchForNarrowLayout->setVisible(!filtersHidden);
+		_mainMenu.toggle->setVisible(false);
+		_mainMenu.under->setVisible(false);
+		_searchForNarrowLayout->setVisible(true);
 		updateControlsGeometry();
 	}, lifetime());
 
@@ -2595,6 +2986,9 @@ void Widget::startChatsFilterSlide(
 		animation->paintFrame(p, 0, 0, canvas->width());
 	});
 	canvas->show();
+	if (_mobileBottomBar) {
+		_mobileBottomBar->raise();
+	}
 	if (_connecting) {
 		_connecting->raise();
 	}
@@ -4547,9 +4941,7 @@ void Widget::updateControlsGeometry() {
 		? ((smallw - ratiow) / float64(smallw - _narrowWidth))
 		: 0.;
 
-	auto filterLeft = (controller()->filtersWidth()
-		? st::dialogsFilterSkip
-		: (st::dialogsFilterPadding.x() + _mainMenu.toggle->width()))
+	auto filterLeft = st::dialogsFilterSkip
 		+ st::dialogsFilterPadding.x();
 	const auto filterRight = st::dialogsFilterSkip
 		+ st::dialogsFilterPadding.x();
@@ -4645,11 +5037,35 @@ void Widget::updateControlsGeometry() {
 	putBottomButton(_updateTelegram);
 	putBottomButton(_downloadBar);
 	putBottomButton(_loadMoreChats);
+	auto connectingBottomSkip = bottomSkip;
+	if (_mobileBottomBar) {
+		const auto showMobileBar = (narrowRatio < 0.4)
+			&& !_childList
+			&& (_layout == Layout::Main);
+		if (showMobileBar) {
+			const auto barMarginX = style::ConvertScale(10);
+			const auto barMarginBottom = style::ConvertScale(8);
+			const auto barHeight = style::ConvertScale(56);
+			const auto barWidth = std::max(
+				style::ConvertScale(160),
+				( _childList ? _narrowWidth : barw ) - 2 * barMarginX);
+			_mobileBottomBar->setGeometry(
+				barMarginX,
+				height() - bottomSkip - barHeight - barMarginBottom,
+				barWidth,
+				barHeight);
+			_mobileBottomBar->show();
+			_mobileBottomBar->raise();
+			connectingBottomSkip += barHeight + barMarginBottom;
+		} else {
+			_mobileBottomBar->hide();
+		}
+	}
 	if (_connecting) {
-		_connecting->setBottomSkip(bottomSkip);
+		_connecting->setBottomSkip(connectingBottomSkip);
 	}
 	if (_layout != Layout::Child) {
-		controller()->setConnectingBottomSkip(bottomSkip);
+		controller()->setConnectingBottomSkip(connectingBottomSkip);
 	}
 
 	const auto wasScrollTop = _scroll->scrollTop();

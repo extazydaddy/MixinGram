@@ -299,6 +299,7 @@ private:
 		not_null<SearchProcessState*> process);
 
 	void updateForceDisplayWide();
+	void setupMobileBottomBar();
 	void scrollToDefault(bool verytop = false);
 	void scrollToDefaultChecked(bool verytop = false);
 	void setupScrollUpButton();
@@ -380,6 +381,7 @@ private:
 	object_ptr<BottomButton> _loadMoreChats = { nullptr };
 	std::unique_ptr<Ui::DownloadBar> _downloadBar;
 	std::unique_ptr<Window::ConnectionState> _connecting;
+	base::unique_qptr<Ui::RpWidget> _mobileBottomBar;
 
 	Ui::Animations::Simple _scrollToAnimation;
 	int _scrollAnimationTo = 0;

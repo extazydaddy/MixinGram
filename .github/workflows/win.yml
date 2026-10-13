@@ -28,6 +28,7 @@ on:
 jobs:
   libs-qt:
     name: Libraries (Qt6)
+    if: false
     runs-on: windows-latest
     env:
       PREPARE_PATH: "Telegram/build/prepare/prepare.py"
@@ -116,6 +117,7 @@ jobs:
 
   libs-owt:
     name: Libraries (WebRTC / tg_owt)
+    if: false
     runs-on: windows-latest
     env:
       PREPARE_PATH: "Telegram/build/prepare/prepare.py"
@@ -202,6 +204,7 @@ jobs:
 
   libs-core:
     name: Libraries (Core & Rust)
+    if: false
     runs-on: windows-latest
     env:
       PREPARE_PATH: "Telegram/build/prepare/prepare.py"
@@ -313,7 +316,6 @@ jobs:
 
   build:
     name: Build MixinGram (.exe)
-    needs: [libs-qt, libs-owt, libs-core]
     runs-on: windows-latest
     env:
       PREPARE_PATH: "Telegram/build/prepare/prepare.py"
@@ -449,6 +451,8 @@ jobs:
           cd %TBUILD%\%REPO_NAME%\Telegram
           cmake --build ..\out --config Debug --parallel --target ^
             Telegram/CMakeFiles/td_ui.dir/Debug/SourceFiles/settings/settings_common.cpp.obj ^
+            Telegram/CMakeFiles/Telegram.dir/Debug/SourceFiles/core/core_settings.cpp.obj ^
+            Telegram/CMakeFiles/Telegram.dir/Debug/SourceFiles/dialogs/dialogs_widget.cpp.obj ^
             Telegram/CMakeFiles/Telegram.dir/Debug/SourceFiles/settings/sections/settings_mixingram.cpp.obj ^
             Telegram/CMakeFiles/Telegram.dir/Debug/SourceFiles/settings/sections/settings_main.cpp.obj ^
             Telegram/CMakeFiles/Telegram.dir/Debug/SourceFiles/window/themes/window_theme.cpp.obj ^
