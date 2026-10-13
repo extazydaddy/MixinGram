@@ -97,13 +97,18 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "inline_bots/bot_attach_web_view.h"
 #include "boxes/peer_list_controllers.h"
 #include "calls/calls_box_controller.h"
+#include "settings/sections/settings_information.h"
 #include "settings/sections/settings_main.h"
+#include "settings/settings_common_session.h"
+#include "ui/widgets/scroll_area.h"
+#include "styles/style_boxes.h"
 #include "styles/style_dialogs.h"
 #include "styles/style_chat.h"
 #include "styles/style_chat_helpers.h"
 #include "styles/style_dialogs_widget.h"
 #include "styles/style_info.h"
 #include "styles/style_menu_icons.h"
+#include "styles/style_settings.h"
 #include "styles/style_window.h"
 #include "base/qt/qt_common_adapters.h"
 
@@ -1694,16 +1699,459 @@ void Widget::setupMobileBottomBar() {
 		return;
 	}
 
+	// 1. Embedded Contacts Page (Tab 0)
+	class ContactsPage final : public Ui::RpWidget {
+	public:
+		ContactsPage(
+			QWidget *parent,
+			not_null<Window::SessionController*> controller)
+		: Ui::RpWidget(parent)
+		, _controller(controller)
+		, _scroll(this, st::dialogsScroll)
+		, _search(this, st::dialogsFilter, tr::lng_dlg_filter())
+		, _listController(&controller->session()) {
+			_listController.setStyleOverrides(&st::contactsWithStories);
+			_listController.setStoriesShown(true);
+			_listController.setSectionHeadersShown(true);
+
+			const auto layout = _scroll->setOwnedWidget(
+				object_ptr<Ui::VerticalLayout>(_scroll.data()));
+			_listContent = layout->add(
+				object_ptr<PeerListContent>(layout, &_listController));
+			_listDelegate.setContent(_listContent);
+			_listController.setDelegate(&_listDelegate);
+
+			const auto spacer = layout->add(
+				object_ptr<Ui::FixedHeightWidget>(layout, style::ConvertScale(72)));
+			spacer->paintOn([=](QPainter &p) {
+				p.fillRect(spacer->rect(), st::dialogsBg);
+			});
+
+			_scroll->widthValue() | rpl::on_next([=](int w) {
+				layout->resizeToWidth(w);
+			}, _scroll->lifetime());
+
+			QObject::connect(_search.data(), &Ui::InputField::changed, [=] {
+				if (_listContent) {
+					_listContent->searchQueryChanged(_search->getLastText());
+				}
+			});
+		}
+
+	protected:
+		void paintEvent(QPaintEvent *) override {
+			Painter p(this);
+			p.fillRect(rect(), st::dialogsBg);
+
+			const auto headerTop = style::ConvertScale(12);
+			auto titleFont = st::dialogsTextFont->f;
+			titleFont.setPixelSize(style::ConvertScale(17));
+			titleFont.setWeight(QFont::Bold);
+			p.setFont(titleFont);
+			p.setPen(st::dialogsNameFg);
+			p.drawText(
+				QRect(
+					style::ConvertScale(16),
+					headerTop,
+					width() - style::ConvertScale(120),
+					style::ConvertScale(26)),
+				Qt::AlignLeft | Qt::AlignVCenter,
+				tr::lng_menu_contacts(tr::now));
+
+			// "+ Добавить" button at top-right
+			const auto addRect = addButtonRect();
+			auto btnFont = st::dialogsTextFont->f;
+			btnFont.setPixelSize(style::ConvertScale(12));
+			btnFont.setWeight(QFont::DemiBold);
+			p.setFont(btnFont);
+			p.setPen(st::windowBgActive);
+			p.drawText(
+				addRect,
+				Qt::AlignRight | Qt::AlignVCenter,
+				u"+ "_q + tr::lng_profile_add_contact(tr::now));
+		}
+
+		void mousePressEvent(QMouseEvent *e) override {
+			if (e->button() == Qt::LeftButton && addButtonRect().contains(e->pos())) {
+				_controller->showAddContact();
+				return;
+			}
+			Ui::RpWidget::mousePressEvent(e);
+		}
+
+		void resizeEvent(QResizeEvent *) override {
+			const auto padX = style::ConvertScale(12);
+			const auto searchTop = style::ConvertScale(44);
+			_search->setGeometry(
+				padX,
+				searchTop,
+				std::max(style::ConvertScale(80), width() - 2 * padX),
+				_search->height());
+			const auto scrollTop = searchTop + _search->height() + style::ConvertScale(8);
+			_scroll->setGeometry(
+				0,
+				scrollTop,
+				width(),
+				std::max(0, height() - scrollTop));
+		}
+
+	private:
+		class EmbeddedContactsController final : public ContactsBoxController {
+		public:
+			using ContactsBoxController::ContactsBoxController;
+		protected:
+			std::unique_ptr<PeerListRow> createRow(not_null<UserData*> user) override {
+				return !user->isSelf()
+					? ContactsBoxController::createRow(user)
+					: nullptr;
+			}
+		};
+
+		[[nodiscard]] QRect addButtonRect() const {
+			return QRect(
+				width() - style::ConvertScale(160),
+				style::ConvertScale(8),
+				style::ConvertScale(144),
+				style::ConvertScale(32));
+		}
+
+		const not_null<Window::SessionController*> _controller;
+		object_ptr<Ui::ScrollArea> _scroll;
+		object_ptr<Ui::InputField> _search;
+		EmbeddedContactsController _listController;
+		PeerListContentDelegateSimple _listDelegate;
+		PeerListContent *_listContent = nullptr;
+	};
+
+	// 2. Embedded Calls Page (Tab 1)
+	class CallsPage final : public Ui::RpWidget {
+	public:
+		CallsPage(
+			QWidget *parent,
+			not_null<Window::SessionController*> controller)
+		: Ui::RpWidget(parent)
+		, _controller(controller)
+		, _scroll(this, st::dialogsScroll)
+		, _callsController(controller)
+		, _groupCallsController(controller) {
+			const auto layout = _scroll->setOwnedWidget(
+				object_ptr<Ui::VerticalLayout>(_scroll.data()));
+
+			const auto groupCalls = layout->add(
+				object_ptr<Ui::SlideWrap<Ui::VerticalLayout>>(
+					layout,
+					object_ptr<Ui::VerticalLayout>(layout)));
+			groupCalls->hide(anim::type::instant);
+			groupCalls->toggleOn(_groupCallsController.shownValue());
+			_groupCallsDelegate.setContent(groupCalls->entity()->add(
+				object_ptr<PeerListContent>(groupCalls->entity(), &_groupCallsController)));
+			_groupCallsController.setDelegate(&_groupCallsDelegate);
+
+			const auto callsContent = layout->add(
+				object_ptr<PeerListContent>(layout, &_callsController));
+			_callsDelegate.setContent(callsContent);
+			_callsController.setDelegate(&_callsDelegate);
+
+			const auto spacer = layout->add(
+				object_ptr<Ui::FixedHeightWidget>(layout, style::ConvertScale(72)));
+			spacer->paintOn([=](QPainter &p) {
+				p.fillRect(spacer->rect(), st::dialogsBg);
+			});
+
+			_scroll->widthValue() | rpl::on_next([=](int w) {
+				layout->resizeToWidth(w);
+			}, _scroll->lifetime());
+		}
+
+	protected:
+		void paintEvent(QPaintEvent *) override {
+			Painter p(this);
+			p.fillRect(rect(), st::dialogsBg);
+
+			const auto topBarH = st::topBarHeight;
+			auto titleFont = st::dialogsTextFont->f;
+			titleFont.setPixelSize(style::ConvertScale(17));
+			titleFont.setWeight(QFont::Bold);
+			p.setFont(titleFont);
+			p.setPen(st::dialogsNameFg);
+			p.drawText(
+				QRect(
+					style::ConvertScale(16),
+					0,
+					width() - style::ConvertScale(32),
+					topBarH),
+				Qt::AlignLeft | Qt::AlignVCenter,
+				tr::lng_menu_calls(tr::now));
+
+			p.fillRect(
+				0,
+				topBarH - st::lineWidth,
+				width(),
+				st::lineWidth,
+				st::shadowFg);
+		}
+
+		void resizeEvent(QResizeEvent *) override {
+			const auto topBarH = st::topBarHeight;
+			_scroll->setGeometry(
+				0,
+				topBarH,
+				width(),
+				std::max(0, height() - topBarH));
+		}
+
+	private:
+		const not_null<Window::SessionController*> _controller;
+		object_ptr<Ui::ScrollArea> _scroll;
+		Calls::BoxController _callsController;
+		PeerListContentDelegateSimple _callsDelegate;
+		Calls::GroupCalls::ListController _groupCallsController;
+		PeerListContentDelegateSimple _groupCallsDelegate;
+	};
+
+	// 3. Embedded Profile & Settings Page (Tab 3) with in-sidebar section swipe!
+	class ProfilePage final : public Ui::RpWidget {
+	public:
+		ProfilePage(
+			QWidget *parent,
+			not_null<Window::SessionController*> controller,
+			Fn<void()> onMainMenu)
+		: Ui::RpWidget(parent)
+		, _controller(controller)
+		, _onMainMenu(std::move(onMainMenu))
+		, _scroll(this, st::defaultSolidScroll) {
+			openSection(Settings::MainId(), false, false);
+		}
+
+		bool handleBackOrReset() {
+			if (!_stack.empty()) {
+				const auto prev = _stack.back();
+				_stack.pop_back();
+				openSection(prev, false, true);
+				return true;
+			}
+			_scroll->scrollToY(0);
+			return false;
+		}
+
+	protected:
+		void paintEvent(QPaintEvent *) override {
+			Painter p(this);
+			p.fillRect(rect(), st::boxBg);
+
+			const auto topBarH = st::topBarHeight;
+			auto titleFont = st::dialogsTextFont->f;
+			titleFont.setPixelSize(style::ConvertScale(16));
+			titleFont.setWeight(QFont::Bold);
+
+			if (!_stack.empty()) {
+				// "← Назад" button on the left + current section title.
+				p.setFont(titleFont);
+				p.setPen(st::windowBgActive);
+				p.drawText(
+					backButtonRect(),
+					Qt::AlignLeft | Qt::AlignVCenter,
+					u"← "_q + tr::lng_create_group_back(tr::now));
+
+				p.setPen(st::dialogsNameFg);
+				p.drawText(
+					QRect(
+						style::ConvertScale(106),
+						0,
+						std::max(0, width() - style::ConvertScale(122)),
+						topBarH),
+					Qt::AlignLeft | Qt::AlignVCenter,
+					_sectionTitle);
+			} else {
+				p.setFont(titleFont);
+				p.setPen(st::dialogsNameFg);
+				p.drawText(
+					QRect(
+						style::ConvertScale(16),
+						0,
+						width() - style::ConvertScale(100),
+						topBarH),
+					Qt::AlignLeft | Qt::AlignVCenter,
+					tr::lng_settings_color_tab_profile(tr::now));
+
+				// Classic menu button ("⋮") at top-right.
+				p.setPen(st::windowBgActive);
+				p.drawText(
+					menuButtonRect(),
+					Qt::AlignRight | Qt::AlignVCenter,
+					u"☰"_q);
+			}
+
+			p.fillRect(
+				0,
+				topBarH - st::lineWidth,
+				width(),
+				st::lineWidth,
+				st::shadowFg);
+		}
+
+		void mousePressEvent(QMouseEvent *e) override {
+			if (e->button() == Qt::LeftButton) {
+				if (!_stack.empty() && backButtonRect().contains(e->pos())) {
+					handleBackOrReset();
+					return;
+				}
+				if (_stack.empty() && menuButtonRect().contains(e->pos())) {
+					if (_onMainMenu) {
+						_onMainMenu();
+					}
+					return;
+				}
+			}
+			Ui::RpWidget::mousePressEvent(e);
+		}
+
+		void resizeEvent(QResizeEvent *) override {
+			const auto topBarH = st::topBarHeight;
+			_scroll->setGeometry(
+				0,
+				topBarH,
+				width(),
+				std::max(0, height() - topBarH));
+			if (_slideCanvas) {
+				_slideCanvas->setGeometry(_scroll->geometry());
+			}
+		}
+
+	private:
+		void openSection(
+				Settings::Type type,
+				bool slideLeft,
+				bool animated) {
+			if (!type) {
+				return;
+			}
+			auto wasCache = QPixmap();
+			if (animated && width() > 0 && _scroll->height() > 0) {
+				wasCache = Ui::GrabOpaque(
+					_scroll.data(),
+					_scroll->rect(),
+					st::boxBg->c);
+			}
+
+			_sectionLifetime.destroy();
+			_currentType = type;
+
+			const auto container = _scroll->setOwnedWidget(
+				object_ptr<Ui::VerticalLayout>(_scroll.data()));
+			auto section = type->create(
+				container,
+				_controller,
+				_scroll.data(),
+				rpl::single(Settings::Container::Section));
+			const auto raw = section.data();
+			raw->setStepDataReference(_stepData);
+			container->add(std::move(section));
+
+			const auto spacer = container->add(
+				object_ptr<Ui::FixedHeightWidget>(
+					container,
+					style::ConvertScale(72)));
+			spacer->paintOn([=](QPainter &p) {
+				p.fillRect(spacer->rect(), st::boxBg);
+			});
+
+			_scroll->widthValue() | rpl::on_next([=](int w) {
+				container->resizeToWidth(w);
+			}, container->lifetime());
+
+			if (_scroll->width() > 0) {
+				container->resizeToWidth(_scroll->width());
+			}
+			Ui::SendPendingMoveResizeEvents(container);
+			raw->showFinished();
+
+			raw->title() | rpl::on_next([=](const QString &t) {
+				_sectionTitle = t;
+				update();
+			}, _sectionLifetime);
+
+			raw->sectionShowOther(
+			) | rpl::on_next([=](Settings::Type nextType) {
+				if (nextType) {
+					_stack.push_back(_currentType);
+					openSection(nextType, true, true);
+				}
+			}, _sectionLifetime);
+
+			raw->sectionShowBack(
+			) | rpl::on_next([=] {
+				handleBackOrReset();
+			}, _sectionLifetime);
+
+			update();
+
+			if (animated && !wasCache.isNull()) {
+				auto nowCache = Ui::GrabOpaque(
+					_scroll.data(),
+					_scroll->rect(),
+					st::boxBg->c);
+				_slideCanvas = std::make_unique<Ui::RpWidget>(this);
+				const auto canvas = _slideCanvas.get();
+				canvas->setAttribute(Qt::WA_TransparentForMouseEvents);
+				canvas->setAttribute(Qt::WA_OpaquePaintEvent);
+				canvas->setGeometry(_scroll->geometry());
+				const auto anim = canvas->lifetime().make_state<Ui::SlideAnimation>();
+				anim->setSnapshots(std::move(wasCache), std::move(nowCache));
+				canvas->paintOn([=](QPainter &p) {
+					p.fillRect(canvas->rect(), st::boxBg);
+					anim->paintFrame(p, 0, 0, canvas->width());
+				});
+				canvas->show();
+				canvas->raise();
+				anim->start(slideLeft, [=] {
+					if (anim->animating()) {
+						canvas->update();
+					} else {
+						_slideCanvas = nullptr;
+					}
+				}, st::dialogsFilterSlideDuration);
+			}
+		}
+
+		[[nodiscard]] QRect backButtonRect() const {
+			return QRect(
+				style::ConvertScale(14),
+				0,
+				style::ConvertScale(90),
+				st::topBarHeight);
+		}
+
+		[[nodiscard]] QRect menuButtonRect() const {
+			return QRect(
+				width() - style::ConvertScale(54),
+				0,
+				style::ConvertScale(38),
+				st::topBarHeight);
+		}
+
+		const not_null<Window::SessionController*> _controller;
+		Fn<void()> _onMainMenu;
+		object_ptr<Ui::ScrollArea> _scroll;
+		std::unique_ptr<Ui::RpWidget> _slideCanvas;
+		std::vector<Settings::Type> _stack;
+		Settings::Type _currentType;
+		QString _sectionTitle;
+		std::any _stepData;
+		rpl::lifetime _sectionLifetime;
+	};
+
+	// 4. Floating Mobile Bottom Navigation Bar with smooth sliding capsule!
 	class MobileBottomBar final : public Ui::RpWidget {
 	public:
 		MobileBottomBar(
 			QWidget *parent,
 			not_null<Window::SessionController*> controller,
-			Fn<void()> onChats,
+			Fn<void(int)> onSelectTab,
 			Fn<void()> onMainMenu)
 		: Ui::RpWidget(parent)
 		, _controller(controller)
-		, _onChats(std::move(onChats))
+		, _onSelectTab(std::move(onSelectTab))
 		, _onMainMenu(std::move(onMainMenu)) {
 			setMouseTracking(true);
 			setCursor(style::cur_pointer);
@@ -1741,6 +2189,26 @@ void Widget::setupMobileBottomBar() {
 			style::PaletteChanged() | rpl::on_next([=] {
 				update();
 			}, lifetime());
+		}
+
+		void setActiveTab(int tab, bool animated = true) {
+			tab = std::clamp(tab, 0, 3);
+			if (_activeTab == tab && !_tabAnimation.animating()) {
+				return;
+			}
+			const auto from = _tabAnimation.value(float64(_activeTab));
+			_activeTab = tab;
+			if (animated) {
+				_tabAnimation.start(
+					[=] { update(); },
+					from,
+					float64(_activeTab),
+					st::dialogsFilterSlideDuration,
+					anim::sineInOut);
+			} else {
+				_tabAnimation.stop();
+			}
+			update();
 		}
 
 	protected:
@@ -1783,6 +2251,20 @@ void Widget::setupMobileBottomBar() {
 				-style::ConvertScale(4),
 				-style::ConvertScale(3));
 			const auto tabWidth = innerRect.width() / 4.0;
+			const auto tabRadius = innerRect.height() / 2.0;
+
+			// Smoothly animated active pill capsule!
+			const auto animatedTab = _tabAnimation.value(float64(_activeTab));
+			const auto activePillRect = QRectF(
+				innerRect.left() + animatedTab * tabWidth,
+				innerRect.top(),
+				tabWidth,
+				innerRect.height());
+			auto activeBg = st::windowBgActive->c;
+			activeBg.setAlpha(40);
+			p.setPen(Qt::NoPen);
+			p.setBrush(activeBg);
+			p.drawRoundedRect(activePillRect, tabRadius, tabRadius);
 
 			const QString labels[4] = {
 				tr::lng_menu_contacts(tr::now),
@@ -1801,17 +2283,13 @@ void Widget::setupMobileBottomBar() {
 					innerRect.top(),
 					tabWidth,
 					innerRect.height());
-				const auto tabRadius = tabRect.height() / 2.0;
-				const auto isActive = (_activeTab == i);
+				const auto activeAmount = std::clamp(
+					1.0 - std::abs(animatedTab - float64(i)),
+					0.0,
+					1.0);
 				const auto isHovered = (_hoveredTab == i);
 
-				if (isActive) {
-					auto activeBg = st::windowBgActive->c;
-					activeBg.setAlpha(38);
-					p.setPen(Qt::NoPen);
-					p.setBrush(activeBg);
-					p.drawRoundedRect(tabRect, tabRadius, tabRadius);
-				} else if (isHovered) {
+				if (isHovered && activeAmount < 0.2) {
 					auto hoverBg = st::windowSubTextFg->c;
 					hoverBg.setAlpha(18);
 					p.setPen(Qt::NoPen);
@@ -1819,9 +2297,10 @@ void Widget::setupMobileBottomBar() {
 					p.drawRoundedRect(tabRect, tabRadius, tabRadius);
 				}
 
-				const auto fg = isActive
-					? st::windowBgActive->c
-					: st::windowSubTextFg->c;
+				const auto fg = anim::color(
+					st::windowSubTextFg->c,
+					st::windowBgActive->c,
+					activeAmount);
 
 				const auto iconSize = style::ConvertScale(22);
 				const auto iconX = tabRect.center().x() - iconSize / 2.0;
@@ -1830,7 +2309,6 @@ void Widget::setupMobileBottomBar() {
 				const auto cy = iconY + iconSize / 2.0;
 
 				if (i == 0) {
-					// Mobile Telegram Contacts icon: filled circle with person cutout.
 					const auto r = style::ConvertScaleExact(10.0);
 					QPainterPath circle;
 					circle.addEllipse(QPointF(cx, cy), r, r);
@@ -1854,18 +2332,15 @@ void Widget::setupMobileBottomBar() {
 					p.setBrush(fg);
 					p.drawPath(circle.subtracted(person));
 				} else if (i == 1) {
-					// Calls handset icon.
 					st::menuIconPhone.paintInCenter(
 						p,
 						QRect(int(iconX), int(iconY), iconSize, iconSize),
 						fg);
 				} else if (i == 2) {
-					// Mobile Telegram Chats icon: two overlapping rounded chat bubbles.
 					const auto bw = style::ConvertScaleExact(14.5);
 					const auto bh = style::ConvertScaleExact(11.5);
 					const auto br = style::ConvertScaleExact(4.5);
 
-					// Back bubble (top-right).
 					QPainterPath backBubble;
 					backBubble.addRoundedRect(
 						QRectF(
@@ -1876,7 +2351,6 @@ void Widget::setupMobileBottomBar() {
 						br,
 						br);
 
-					// Front bubble (bottom-left) + cutout gap around it.
 					const auto frontRect = QRectF(
 						cx - style::ConvertScaleExact(9.5),
 						cy - style::ConvertScaleExact(4.0),
@@ -1924,18 +2398,17 @@ void Widget::setupMobileBottomBar() {
 							iconY - style::ConvertScale(2),
 							bwBadge,
 							bhBadge);
-						p.setPen( QPen(pillBg, style::ConvertScaleExact(1.5)) );
+						p.setPen(QPen(pillBg, style::ConvertScaleExact(1.5)));
 						p.setBrush(st::windowBgActive->c);
 						p.drawRoundedRect(badgeRect, bhBadge / 2.0, bhBadge / 2.0);
 						p.setPen(st::windowFgActive->c);
 						p.drawText(badgeRect, Qt::AlignCenter, badgeText);
 					}
 				} else if (i == 3) {
-					// Profile tab: user's circular avatar.
 					const auto user = _controller->session().user();
 					const auto avatarSize = style::ConvertScale(22);
-					const auto ax = int( std::round(cx - avatarSize / 2.0) );
-					const auto ay = int( std::round(iconY) );
+					const auto ax = int(std::round(cx - avatarSize / 2.0));
+					const auto ay = int(std::round(iconY));
 					user->paintUserpic(
 						p,
 						_userpicView,
@@ -1943,9 +2416,11 @@ void Widget::setupMobileBottomBar() {
 						ay,
 						avatarSize,
 						true);
-					if (isActive) {
+					if (activeAmount > 0.05) {
+						auto ringColor = st::windowBgActive->c;
+						ringColor.setAlphaF(activeAmount);
 						p.setBrush(Qt::NoBrush);
-						p.setPen(QPen(fg, style::ConvertScaleExact(1.6)));
+						p.setPen(QPen(ringColor, style::ConvertScaleExact(1.6)));
 						p.drawEllipse(
 							QRectF(ax - 1.5, ay - 1.5, avatarSize + 3.0, avatarSize + 3.0));
 					}
@@ -1962,7 +2437,6 @@ void Widget::setupMobileBottomBar() {
 					}
 				}
 
-				// Tab text label.
 				p.setFont(labelFont);
 				p.setPen(fg);
 				const auto textRect = QRectF(
@@ -2003,24 +2477,9 @@ void Widget::setupMobileBottomBar() {
 			if (tab < 0 || tab > 3) {
 				return;
 			}
-			if (tab == 0) {
-				_activeTab = 2;
-				update();
-				_controller->show(PrepareContactsBox(_controller));
-			} else if (tab == 1) {
-				_activeTab = 2;
-				update();
-				::Calls::ShowCallsBox(_controller);
-			} else if (tab == 2) {
-				_activeTab = 2;
-				update();
-				if (_onChats) {
-					_onChats();
-				}
-			} else if (tab == 3) {
-				_activeTab = 2;
-				update();
-				_controller->showSettings(Settings::MainId());
+			setActiveTab(tab, true);
+			if (_onSelectTab) {
+				_onSelectTab(tab);
 			}
 		}
 
@@ -2035,31 +2494,143 @@ void Widget::setupMobileBottomBar() {
 		}
 
 		const not_null<Window::SessionController*> _controller;
-		Fn<void()> _onChats;
+		Fn<void(int)> _onSelectTab;
 		Fn<void()> _onMainMenu;
 		Ui::PeerUserpicView _userpicView;
+		Ui::Animations::Simple _tabAnimation;
 		int _activeTab = 2;
 		int _hoveredTab = -1;
 		int _unreadChats = 0;
 		int _otherAccountsUnread = 0;
 	};
 
+	_contactsPage.reset(Ui::CreateChild<ContactsPage>(this, controller()));
+	_contactsPage->hide();
+
+	_callsPage.reset(Ui::CreateChild<CallsPage>(this, controller()));
+	_callsPage->hide();
+
+	_profilePage.reset(Ui::CreateChild<ProfilePage>(
+		this,
+		controller(),
+		[=] { showMainMenu(); }));
+	_profilePage->hide();
+
 	_mobileBottomBar.reset(Ui::CreateChild<MobileBottomBar>(
 		this,
 		controller(),
-		[=] {
-			controller()->window().hideSettingsAndLayer();
-			if (_searchHasFocus || !_search->getLastText().isEmpty() || _openedFolder) {
-				escape();
-			} else {
-				jumpToTop();
-			}
+		[=](int tab) {
+			switchToMobileTab(tab, true);
 		},
 		[=] {
 			showMainMenu();
 		}));
 	_mobileBottomBar->show();
 	_mobileBottomBar->raise();
+}
+
+void Widget::switchToMobileTab(int tab, bool animated) {
+	tab = std::clamp(tab, 0, 3);
+	if (tab == _activeMobileTab) {
+		if (tab == 2) {
+			if (_searchHasFocus || !_search->getLastText().isEmpty() || _openedFolder) {
+				escape();
+			} else {
+				jumpToTop();
+			}
+		}
+		return;
+	}
+
+	const auto oldTab = _activeMobileTab;
+	const auto slideLeft = (tab > oldTab);
+	_mobileTabSlideCanvas = nullptr;
+
+	const auto pageRect = QRect(
+		0,
+		0,
+		_childList ? _narrowWidth : width(),
+		height());
+
+	auto wasCache = QPixmap();
+	if (animated && pageRect.width() > 0 && pageRect.height() > 0) {
+		const auto barShown = _mobileBottomBar && !_mobileBottomBar->isHidden();
+		if (barShown) {
+			_mobileBottomBar->hide();
+		}
+		wasCache = Ui::GrabOpaque(this, pageRect, st::dialogsBg->c);
+		if (barShown) {
+			_mobileBottomBar->show();
+		}
+	}
+
+	_activeMobileTab = tab;
+	if (_contactsPage) {
+		_contactsPage->setGeometry(pageRect);
+		_contactsPage->setVisible(_activeMobileTab == 0);
+		if (_activeMobileTab == 0) {
+			_contactsPage->raise();
+		}
+	}
+	if (_callsPage) {
+		_callsPage->setGeometry(pageRect);
+		_callsPage->setVisible(_activeMobileTab == 1);
+		if (_activeMobileTab == 1) {
+			_callsPage->raise();
+		}
+	}
+	if (_profilePage) {
+		_profilePage->setGeometry(pageRect);
+		_profilePage->setVisible(_activeMobileTab == 3);
+		if (_activeMobileTab == 3) {
+			_profilePage->raise();
+		}
+	}
+
+	if (animated && !wasCache.isNull()) {
+		const auto barShown = _mobileBottomBar && !_mobileBottomBar->isHidden();
+		if (barShown) {
+			_mobileBottomBar->hide();
+		}
+		auto nowCache = Ui::GrabOpaque(this, pageRect, st::dialogsBg->c);
+		if (barShown) {
+			_mobileBottomBar->show();
+		}
+
+		_mobileTabSlideCanvas = std::make_unique<Ui::RpWidget>(this);
+		const auto canvas = _mobileTabSlideCanvas.get();
+		canvas->setAttribute(Qt::WA_TransparentForMouseEvents);
+		canvas->setAttribute(Qt::WA_OpaquePaintEvent);
+		canvas->setGeometry(pageRect);
+		const auto anim = canvas->lifetime().make_state<Ui::SlideAnimation>();
+		anim->setSnapshots(std::move(wasCache), std::move(nowCache));
+		canvas->paintOn([=](QPainter &p) {
+			p.fillRect(canvas->rect(), st::dialogsBg);
+			anim->paintFrame(p, 0, 0, canvas->width());
+		});
+		canvas->show();
+		canvas->raise();
+		if (_mobileBottomBar) {
+			_mobileBottomBar->raise();
+		}
+		if (_connecting) {
+			_connecting->raise();
+		}
+		anim->start(slideLeft, [=] {
+			if (anim->animating()) {
+				canvas->update();
+			} else {
+				_mobileTabSlideCanvas = nullptr;
+			}
+		}, st::dialogsFilterSlideDuration);
+	} else {
+		if (_mobileBottomBar) {
+			_mobileBottomBar->raise();
+		}
+		if (_connecting) {
+			_connecting->raise();
+		}
+	}
 }
 
 void Widget::setupMainMenuToggle() {
@@ -5042,13 +5613,40 @@ void Widget::updateControlsGeometry() {
 		const auto showMobileBar = (narrowRatio < 0.4)
 			&& !_childList
 			&& (_layout == Layout::Main);
+		const auto pageW = _childList ? _narrowWidth : barw;
+		const auto pageRect = QRect(0, 0, pageW, std::max(0, height() - bottomSkip));
 		if (showMobileBar) {
+			if (_contactsPage) {
+				_contactsPage->setGeometry(pageRect);
+				_contactsPage->setVisible(_activeMobileTab == 0);
+				if (_activeMobileTab == 0) {
+					_contactsPage->raise();
+				}
+			}
+			if (_callsPage) {
+				_callsPage->setGeometry(pageRect);
+				_callsPage->setVisible(_activeMobileTab == 1);
+				if (_activeMobileTab == 1) {
+					_callsPage->raise();
+				}
+			}
+			if (_profilePage) {
+				_profilePage->setGeometry(pageRect);
+				_profilePage->setVisible(_activeMobileTab == 3);
+				if (_activeMobileTab == 3) {
+					_profilePage->raise();
+				}
+			}
+			if (_mobileTabSlideCanvas) {
+				_mobileTabSlideCanvas->setGeometry(pageRect);
+				_mobileTabSlideCanvas->raise();
+			}
 			const auto barMarginX = style::ConvertScale(10);
 			const auto barMarginBottom = style::ConvertScale(8);
 			const auto barHeight = style::ConvertScale(56);
 			const auto barWidth = std::max(
 				style::ConvertScale(160),
-				( _childList ? _narrowWidth : barw ) - 2 * barMarginX);
+				pageW - 2 * barMarginX);
 			_mobileBottomBar->setGeometry(
 				barMarginX,
 				height() - bottomSkip - barHeight - barMarginBottom,
@@ -5058,6 +5656,15 @@ void Widget::updateControlsGeometry() {
 			_mobileBottomBar->raise();
 			connectingBottomSkip += barHeight + barMarginBottom;
 		} else {
+			if (_contactsPage) {
+				_contactsPage->hide();
+			}
+			if (_callsPage) {
+				_callsPage->hide();
+			}
+			if (_profilePage) {
+				_profilePage->hide();
+			}
 			_mobileBottomBar->hide();
 		}
 	}
@@ -5254,7 +5861,8 @@ QVariant Widget::inputMethodQuery(Qt::InputMethodQuery query) const {
 }
 
 bool Widget::redirectToSearchPossible() const {
-	return !_openedFolder
+	return (_activeMobileTab == 2)
+		&& !_openedFolder
 		&& !_openedForum
 		&& !_openedCommunity
 		&& !_childList
@@ -5520,6 +6128,12 @@ bool Widget::cancelSearch(CancelSearchOptions options) {
 
 Widget::~Widget() {
 	cancelSearchRequest();
+
+	_mobileTabSlideCanvas = nullptr;
+	_contactsPage = nullptr;
+	_callsPage = nullptr;
+	_profilePage = nullptr;
+	_mobileBottomBar = nullptr;
 
 	// Destructor may hide the bar and attempt to double-destroy it.
 	base::take(_downloadBar);

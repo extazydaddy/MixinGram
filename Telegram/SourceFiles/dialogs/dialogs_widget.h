@@ -300,6 +300,7 @@ private:
 
 	void updateForceDisplayWide();
 	void setupMobileBottomBar();
+	void switchToMobileTab(int tab, bool animated = true);
 	void scrollToDefault(bool verytop = false);
 	void scrollToDefaultChecked(bool verytop = false);
 	void setupScrollUpButton();
@@ -382,6 +383,11 @@ private:
 	std::unique_ptr<Ui::DownloadBar> _downloadBar;
 	std::unique_ptr<Window::ConnectionState> _connecting;
 	base::unique_qptr<Ui::RpWidget> _mobileBottomBar;
+	base::unique_qptr<Ui::RpWidget> _contactsPage;
+	base::unique_qptr<Ui::RpWidget> _callsPage;
+	base::unique_qptr<Ui::RpWidget> _profilePage;
+	std::unique_ptr<Ui::RpWidget> _mobileTabSlideCanvas;
+	int _activeMobileTab = 2;
 
 	Ui::Animations::Simple _scrollToAnimation;
 	int _scrollAnimationTo = 0;

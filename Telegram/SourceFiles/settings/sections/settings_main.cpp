@@ -62,6 +62,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "settings/sections/settings_premium.h"
 #include "settings/sections/settings_privacy_security.h"
 #include "settings/settings_scale_preview.h"
+#include "window/themes/window_theme.h"
 #include "storage/localstorage.h"
 #include "ui/basic_click_handlers.h"
 #include "ui/boxes/confirm_box.h"
@@ -378,8 +379,7 @@ void BuildSectionButtons(SectionBuilder &builder) {
 			.title = tr::lng_settings_my_account(),
 			.icon = { &st::menuIconProfile },
 			.onClick = [=] {
-				controller->showSection(
-					Info::Stories::MakeMyProfile(session->user()));
+				showOther(InformationId());
 			},
 			.keywords = { u"profile"_q, u"edit"_q, u"information"_q },
 		});
@@ -390,6 +390,25 @@ void BuildSectionButtons(SectionBuilder &builder) {
 		.targetSection = MixinGramId(),
 		.icon = MixinGramIconDescriptor(),
 		.keywords = { u"mixingram"_q, u"mg"_q, u"gif"_q, u"фон"_q, u"кастомный"_q },
+	});
+
+	builder.addButton({
+		.title = tr::lng_saved_messages(),
+		.icon = { &st::menuIconSavedMessages },
+		.onClick = [=] {
+			controller->showPeerHistory(session->user());
+		},
+		.keywords = { u"saved"_q, u"избранное"_q },
+	});
+
+	builder.addButton({
+		.title = tr::lng_menu_night_mode(),
+		.icon = { &st::menuIconNightMode },
+		.onClick = [=] {
+			Window::Theme::ToggleNightMode();
+			Window::Theme::KeepApplied();
+		},
+		.keywords = { u"night"_q, u"dark"_q, u"ночной"_q, u"тема"_q },
 	});
 
 	builder.addSectionButton({
