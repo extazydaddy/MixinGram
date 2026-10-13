@@ -31,6 +31,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/text/text_custom_emoji.h"
 #include "ui/toast/toast.h"
 #include "window/section_memento.h"
+#include "window/themes/window_theme.h"
 #include "window/window_slide_animation.h"
 #include "window/window_session_controller.h"
 #include "window/themes/window_theme.h"
@@ -243,6 +244,11 @@ AbstractSectionWidget::AbstractSectionWidget(
 	}) | rpl::flatten_latest() | rpl::on_next([=] {
 		update();
 	}, lifetime());
+
+	Window::Theme::Background()->gifFrameUpdates(
+	) | rpl::on_next([=] {
+		update();
+	}, lifetime());
 }
 
 Main::Session &AbstractSectionWidget::session() const {
@@ -392,6 +398,14 @@ void SectionWidget::PaintBackground(
 		QSize fill,
 		QRect clip,
 		bool paused) {
+	if (Window::Theme::Background()->hasAnimatedGif()
+		&& Window::Theme::Background()->paintAnimatedGif(
+			p,
+			fill,
+			clip,
+			paused)) {
+		return;
+	}
 	const auto &background = theme->background();
 	if (background.colorForFill) {
 		p.fillRect(clip, *background.colorForFill);

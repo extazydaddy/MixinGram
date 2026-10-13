@@ -7,6 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include "base/timer.h"
 #include "data/data_wall_paper.h"
 #include "data/data_cloud_themes.h"
 #include "ui/style/style_core_palette.h"
@@ -214,13 +215,40 @@ public:
 	[[nodiscard]] std::optional<QColor> imageMonoColor() const;
 	[[nodiscard]] bool nightModeChangeAllowed() const;
 
+	bool setAnimatedGifFromFile(
+		const QString &path,
+		const QByteArray &content = QByteArray());
+	void clearAnimatedGif(bool removeSavedFile = true);
+	[[nodiscard]] bool hasAnimatedGif() const {
+		return !_gifFrames.empty();
+	}
+	[[nodiscard]] rpl::producer<> gifFrameUpdates() const {
+		return _gifFrameUpdates.events();
+	}
+	bool paintAnimatedGif(
+		QPainter &p,
+		QSize fill,
+		QRect clip,
+		bool paused);
+
 private:
+	struct GifFrame {
+		QImage image;
+		crl::time delay = 60;
+	};
 	struct AdjustableColor {
 		AdjustableColor(style::color data);
 
 		style::color item;
 		QColor original;
 	};
+
+	void advanceGifFrame();
+	void scheduleNextGifFrame();
+	void loadSavedAnimatedGif();
+	[[nodiscard]] bool decodeGifFrames(
+		const QString &path,
+		const QByteArray &content);
 
 	[[nodiscard]] bool started() const;
 	void initialRead();
@@ -297,6 +325,17 @@ private:
 	FullMsgId _wallPaperUploadId;
 	mtpRequestId _wallPaperRequestId = 0;
 	rpl::lifetime _wallPaperUploadLifetime;
+
+	std::vector<GifFrame> _gifFrames;
+	int _gifFrameIndex = 0;
+	base::Timer _gifTimer;
+	rpl::event_stream<> _gifFrameUpdates;
+	QPixmap _gifCachedPixmap;
+	QSize _gifCachedFill;
+	QRect _gifCachedRect;
+	int _gifCachedIndex = -1;
+	bool _gifCachedTile = false;
+	bool _settingGifInternal = false;
 
 	rpl::lifetime _lifetime;
 

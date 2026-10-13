@@ -371,7 +371,37 @@ void AbstractSection::setNavigationAnchor(not_null<QWidget*> widget) {
 	_keyNavigation->anchorTo(widget);
 }
 
-Icon::Icon(IconDescriptor descriptor) : _icon(descriptor.icon) {
+IconDescriptor MixinGramIconDescriptor() {
+	auto gradient = QLinearGradient(0, 0, 24, 24);
+	gradient.setColorAt(0., QColor(255, 42, 85));
+	gradient.setColorAt(0.5, QColor(255, 15, 57));
+	gradient.setColorAt(1., QColor(200, 0, 34));
+	return {
+		.icon = &st::settingsIconMixinGram,
+		.type = IconType::Rounded,
+		.backgroundBrush = QBrush(gradient),
+		.customIconResource = u":/gui/icons/settings/mixingram_color.png"_q,
+	};
+}
+
+IconDescriptor MixinGramWallpaperIconDescriptor() {
+	auto gradient = QLinearGradient(0, 0, 24, 24);
+	gradient.setColorAt(0., QColor(255, 42, 85));
+	gradient.setColorAt(0.5, QColor(255, 15, 57));
+	gradient.setColorAt(1., QColor(200, 0, 34));
+	return {
+		.icon = &st::settingsIconMixinGramWallpaper,
+		.type = IconType::Rounded,
+		.backgroundBrush = QBrush(gradient),
+		.customIconResource = u":/gui/icons/settings/mixingram_wallpaper_color.png"_q,
+	};
+}
+
+Icon::Icon(IconDescriptor descriptor)
+: _icon(descriptor.icon ? descriptor.icon : &st::settingsIconMixinGram) {
+	if (!descriptor.customIconResource.isEmpty()) {
+		_customImage = QImage(descriptor.customIconResource);
+	}
 	const auto background = [&]() -> const style::color* {
 		if (descriptor.type == IconType::Simple) {
 			return nullptr;
@@ -396,6 +426,11 @@ void Icon::paint(QPainter &p, QPoint position) const {
 }
 
 void Icon::paint(QPainter &p, int x, int y) const {
+	if (!_customImage.isNull()) {
+		PainterHighQualityEnabler hq(p);
+		p.drawImage(QRect(QPoint(x, y), _icon->size()), _customImage);
+		return;
+	}
 	if (_background) {
 		_background->paint(p, { { x, y }, _icon->size() });
 	} else if (_backgroundBrush) {

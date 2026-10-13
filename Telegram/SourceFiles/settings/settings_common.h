@@ -231,12 +231,16 @@ struct IconDescriptor {
 	IconType type = IconType::Rounded;
 	const style::color *background = nullptr;
 	std::optional<QBrush> backgroundBrush; // Can be useful for gradients.
+	QString customIconResource;
 	bool newBadge = false;
 
 	explicit operator bool() const {
-		return (icon != nullptr);
+		return (icon != nullptr) || !customIconResource.isEmpty();
 	}
 };
+
+[[nodiscard]] IconDescriptor MixinGramIconDescriptor();
+[[nodiscard]] IconDescriptor MixinGramWallpaperIconDescriptor();
 
 class Icon final {
 public:
@@ -253,6 +257,7 @@ private:
 	not_null<const style::icon*> _icon;
 	std::optional<Ui::RoundRect> _background;
 	std::optional<std::pair<int, QBrush>> _backgroundBrush;
+	QImage _customImage;
 
 };
 

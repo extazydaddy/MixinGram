@@ -98,6 +98,8 @@ settingsUpdate: SettingsButton(infoMainButton, settingsButtonNoIcon) {
 settingsUpdateStatePosition: point(22px, 29px);
 
 settingsIconInterfaceScale: icon {{ "settings/interface_scale", settingsIconFg }};
+settingsIconMixinGram: icon {{ "settings/mixingram", settingsIconFg }};
+settingsIconMixinGramWallpaper: icon {{ "settings/mixingram_wallpaper", settingsIconFg }};
 
 settingsPremiumIconDouble: icon {{ "settings/premium/double", settingsIconFg }};
 settingsPremiumIconTags: icon {{ "settings/premium/tags", settingsIconFg }};

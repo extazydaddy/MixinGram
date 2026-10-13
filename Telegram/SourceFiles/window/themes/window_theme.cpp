@@ -42,10 +42,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "webview/webview_common.h"
 
 #include <QtCore/QBuffer>
+#include <QtCore/QDir>
+#include <QtCore/QFile>
+#include <QtCore/QFileInfo>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 #include <QtCore/QFileSystemWatcher>
 #include <QtGui/QGuiApplication>
+#include <QtGui/QImageReader>
 #include <QtGui/QStyleHints>
 
 namespace Window {
@@ -509,6 +513,10 @@ void ClearEditingPalette() {
 	QFile(EditingPalettePath()).remove();
 }
 
+[[nodiscard]] QString AnimatedGifStoragePath() {
+	return cWorkingDir() + u"tdata/mixingram_background.gif"_q;
+}
+
 } // namespace
 
 ChatBackground::AdjustableColor::AdjustableColor(style::color data)
@@ -517,13 +525,15 @@ ChatBackground::AdjustableColor::AdjustableColor(style::color data)
 }
 
 // They're duplicated in window_theme_editor_box.cpp:ReplaceAdjustableColors.
-ChatBackground::ChatBackground() : _adjustableColors({
-		st::msgServiceBg,
-		st::msgServiceBgSelected,
-		st::historyScrollBg,
-		st::historyScrollBgOver,
-		st::historyScrollBarBg,
-		st::historyScrollBarBgOver }) {
+ChatBackground::ChatBackground()
+: _adjustableColors({
+	st::msgServiceBg,
+	st::msgServiceBgSelected,
+	st::historyScrollBg,
+	st::historyScrollBgOver,
+	st::historyScrollBarBg,
+	st::historyScrollBarBgOver })
+, _gifTimer([=] { advanceGifFrame(); }) {
 }
 
 ChatBackground::~ChatBackground() = default;
@@ -551,6 +561,7 @@ void ChatBackground::initialRead() {
 	if (_localStoredTileNightValue) {
 		_tileNightValue = *_localStoredTileNightValue;
 	}
+	loadSavedAnimatedGif();
 }
 
 void ChatBackground::start() {
@@ -715,7 +726,210 @@ QImage ChatBackground::postprocessBackgroundImage(QImage image) {
 	return PostprocessBackgroundImage(std::move(image), _paper);
 }
 
+bool ChatBackground::decodeGifFrames(
+		const QString &path,
+		const QByteArray &content) {
+	auto rawBytes = content;
+	if (rawBytes.isEmpty() && !path.isEmpty()) {
+		auto file = QFile(path);
+		if (file.open(QIODevice::ReadOnly)) {
+			rawBytes = file.readAll();
+		}
+	}
+	if (rawBytes.isEmpty()) {
+		return false;
+	}
+	auto buffer = QBuffer(&rawBytes);
+	if (!buffer.open(QIODevice::ReadOnly)) {
+		return false;
+	}
+	auto reader = QImageReader(&buffer);
+	reader.setAutoTransform(true);
+	if (!reader.canRead()) {
+		return false;
+	}
+
+	constexpr auto kMaxGifFrames = 240;
+	constexpr auto kMaxGifDimension = 1600;
+	auto frames = std::vector<GifFrame>();
+	while (reader.canRead() && int(frames.size()) < kMaxGifFrames) {
+		auto frame = reader.read();
+		if (frame.isNull()) {
+			break;
+		}
+		const auto delay = std::max(reader.nextImageDelay(), 20);
+		if (frame.width() > kMaxGifDimension
+			|| frame.height() > kMaxGifDimension) {
+			frame = frame.scaled(
+				kMaxGifDimension,
+				kMaxGifDimension,
+				Qt::KeepAspectRatio,
+				Qt::SmoothTransformation);
+		}
+		if (frame.format() != QImage::Format_ARGB32_Premultiplied) {
+			frame = std::move(frame).convertToFormat(
+				QImage::Format_ARGB32_Premultiplied);
+		}
+		frames.push_back(GifFrame{
+			.image = std::move(frame),
+			.delay = crl::time(delay),
+		});
+		if (!reader.supportsAnimation()) {
+			break;
+		}
+	}
+	if (frames.empty()) {
+		return false;
+	}
+
+	_gifTimer.cancel();
+	_gifFrames = std::move(frames);
+	_gifFrameIndex = 0;
+	_gifCachedPixmap = QPixmap();
+	_gifCachedFill = QSize();
+	_gifCachedIndex = -1;
+	return true;
+}
+
+bool ChatBackground::setAnimatedGifFromFile(
+		const QString &path,
+		const QByteArray &content) {
+	auto rawBytes = content;
+	if (rawBytes.isEmpty() && !path.isEmpty()) {
+		auto file = QFile(path);
+		if (file.open(QIODevice::ReadOnly)) {
+			rawBytes = file.readAll();
+		}
+	}
+	if (!decodeGifFrames(QString(), rawBytes)) {
+		return false;
+	}
+
+	const auto storagePath = AnimatedGifStoragePath();
+	QDir().mkpath(QFileInfo(storagePath).absolutePath());
+	auto out = QFile(storagePath);
+	if (out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+		out.write(rawBytes);
+		out.close();
+	}
+
+	_settingGifInternal = true;
+	set(Data::CustomWallPaper(), _gifFrames.front().image);
+	setTile(false);
+	_settingGifInternal = false;
+
+	scheduleNextGifFrame();
+	_gifFrameUpdates.fire({});
+	return true;
+}
+
+void ChatBackground::clearAnimatedGif(bool removeSavedFile) {
+	_gifTimer.cancel();
+	_gifFrames.clear();
+	_gifFrameIndex = 0;
+	_gifCachedPixmap = QPixmap();
+	_gifCachedFill = QSize();
+	_gifCachedIndex = -1;
+	if (removeSavedFile) {
+		QFile::remove(AnimatedGifStoragePath());
+	}
+	_gifFrameUpdates.fire({});
+}
+
+void ChatBackground::advanceGifFrame() {
+	if (_gifFrames.size() <= 1) {
+		return;
+	}
+	_gifFrameIndex = (_gifFrameIndex + 1) % int(_gifFrames.size());
+	scheduleNextGifFrame();
+	_gifFrameUpdates.fire({});
+}
+
+void ChatBackground::scheduleNextGifFrame() {
+	if (_gifFrames.size() <= 1) {
+		_gifTimer.cancel();
+		return;
+	}
+	const auto delay = _gifFrames[_gifFrameIndex].delay;
+	_gifTimer.callOnce(std::max(delay, crl::time(20)));
+}
+
+void ChatBackground::loadSavedAnimatedGif() {
+	const auto storagePath = AnimatedGifStoragePath();
+	if (!QFileInfo::exists(storagePath)) {
+		return;
+	}
+	if (decodeGifFrames(storagePath, QByteArray())) {
+		scheduleNextGifFrame();
+		_gifFrameUpdates.fire({});
+	}
+}
+
+bool ChatBackground::paintAnimatedGif(
+		QPainter &p,
+		QSize fill,
+		QRect clip,
+		bool paused) {
+	if (_gifFrames.empty() || fill.isEmpty()) {
+		return false;
+	}
+	if (paused) {
+		_gifTimer.cancel();
+	} else if (_gifFrames.size() > 1 && !_gifTimer.isActive()) {
+		scheduleNextGifFrame();
+	}
+	const auto index = std::clamp(
+		_gifFrameIndex,
+		0,
+		int(_gifFrames.size()) - 1);
+	const auto &frame = _gifFrames[index].image;
+	if (frame.isNull()) {
+		return false;
+	}
+	if (tile()) {
+		const auto ratio = style::DevicePixelRatio();
+		const auto w = std::max(1., frame.width() / float64(ratio));
+		const auto h = std::max(1., frame.height() / float64(ratio));
+		const auto sx = int(std::floor(clip.left() / w));
+		const auto sy = int(std::floor(clip.top() / h));
+		const auto cx = int(std::ceil((clip.left() + clip.width()) / w));
+		const auto cy = int(std::ceil((clip.top() + clip.height()) / h));
+		for (auto i = sx; i < cx; ++i) {
+			for (auto j = sy; j < cy; ++j) {
+				p.drawImage(
+					QRectF(i * w, j * h, w, h),
+					frame,
+					QRectF(QPointF(), frame.size()));
+			}
+		}
+		return true;
+	}
+	if (_gifCachedPixmap.isNull()
+		|| _gifCachedFill != fill
+		|| _gifCachedIndex != index
+		|| _gifCachedTile != tile()) {
+		const auto ratio = style::DevicePixelRatio();
+		const auto rects = Ui::ComputeChatBackgroundRects(fill, frame.size());
+		auto scaled = frame.copy(rects.from).scaled(
+			rects.to.width() * ratio,
+			rects.to.height() * ratio,
+			Qt::IgnoreAspectRatio,
+			Qt::SmoothTransformation);
+		scaled.setDevicePixelRatio(ratio);
+		_gifCachedPixmap = Ui::PixmapFromImage(std::move(scaled));
+		_gifCachedRect = rects.to;
+		_gifCachedFill = fill;
+		_gifCachedIndex = index;
+		_gifCachedTile = tile();
+	}
+	p.drawPixmap(_gifCachedRect, _gifCachedPixmap);
+	return true;
+}
+
 void ChatBackground::set(const Data::WallPaper &paper, QImage image) {
+	if (!_settingGifInternal && !_gifFrames.empty()) {
+		clearAnimatedGif(true);
+	}
 	image = Ui::PreprocessBackgroundImage(std::move(image));
 
 	const auto needResetAdjustable = Data::IsDefaultWallPaper(paper)
