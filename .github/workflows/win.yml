@@ -3,7 +3,6 @@ name: Windows.
 on:
   workflow_dispatch:
   push:
-    # Pushes to the canary branches run only canary.yml, see there.
     branches-ignore:
       - public-canary
       - private-canary
@@ -25,62 +24,344 @@ on:
       - 'Telegram/Telegram/**'
       - 'Telegram/configure.sh'
       - 'Telegram/Telegram.plist'
-  pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
-      - '!docs/building-win*.md'
-      - 'changelog.txt'
-      - 'LEGAL'
-      - 'LICENSE'
-      - '.github/**'
-      - '!.github/workflows/win.yml'
-      - 'lib/xdg/**'
-      - 'snap/**'
-      - 'Telegram/build/docker/**'
-      - 'Telegram/Resources/uwp/**'
-      - 'Telegram/SourceFiles/platform/linux/**'
-      - 'Telegram/SourceFiles/platform/mac/**'
-      - 'Telegram/Telegram/**'
-      - 'Telegram/configure.sh'
-      - 'Telegram/Telegram.plist'
 
 jobs:
-
-  windows:
-    name: Windows
+  libs-qt:
+    name: Libraries (Qt6)
     runs-on: windows-latest
-
-    strategy:
-      matrix:
-        arch: [x64]
-        qt: [qt6]
-        generator: ["Ninja Multi-Config"]
-
     env:
-      UPLOAD_ARTIFACT: "true"
-      ONLY_CACHE: "false"
       PREPARE_PATH: "Telegram/build/prepare/prepare.py"
-
     defaults:
       run:
         shell: cmd
-
     steps:
       - name: Prepare directories.
         run: |
           mkdir %userprofile%\TBuild\Libraries
           mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
           echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
-          echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries${{ matrix.arch == 'x64' && '\win64' || '' }}>>%GITHUB_ENV%
+          echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
 
       - name: Get repository name.
         shell: bash
-        run: echo "REPO_NAME=${GITHUB_REPOSITORY##*/}" >> $GITHUB_ENV
+        run: echo "REPO_NAME=${GITHUB_REPOSITORY##*/}" >> "$GITHUB_ENV"
+
+      - name: Clone (shallow, no submodules needed for libraries).
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+          path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
+
+      - name: First set up.
+        shell: bash
+        run: |
+          DOCPATH=$TBUILD/$REPO_NAME/docs/building-win.md
+          SDK="$(grep "SDK version" "$DOCPATH" | sed -r 's/.*\*\*(.*)\*\* SDK version.*/\1/')"
+          echo "SDK=$SDK" >> "$GITHUB_ENV"
+
+          sed -i '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/${_Zi}//;s/\/RTC1//' "$PROGRAMFILES"/CMake/share/cmake*/Modules/Platform/Windows-MSVC.cmake
+
+          echo "$(sha256sum "$TBUILD/$REPO_NAME/$PREPARE_PATH" | awk '{ print $1 }')" >> CACHE_KEY.txt
+          echo "$SDK" >> CACHE_KEY.txt
+          echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> "$GITHUB_ENV"
+
+          sed -i 's/mingw-w64-x86_64-diffutils/diffutils/' "$TBUILD/$REPO_NAME/$PREPARE_PATH"
+          sed -i 's/-force-debug-info//' "$TBUILD/$REPO_NAME/$PREPARE_PATH"
+
+          git config --global user.email "you@example.com"
+          git config --global user.name "Sample"
+
+      - uses: Eden-CI/msvc-dev-cmd@master
+        name: Native Tools Command Prompt.
+        with:
+          arch: x64
+          sdk: ${{ env.SDK }}
+          toolset: '14.44'
+
+      - name: NuGet sources.
+        run: |
+          nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
+          nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
+
+      - name: Restore Qt cache.
+        id: cache-qt
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: ${{ runner.OS }}-x64-qt6-v3-${{ env.CACHE_KEY }}
+
+      - name: Build Qt6.
+        if: steps.cache-qt.outputs.cache-hit != 'true'
+        run: |
+          %TBUILD%\%REPO_NAME%\Telegram\build\prepare\win.bat skip-release silent qt6 patches msys64 python NuGet jom zlib mozjpeg openssl3 libwebp liblcms2 qt_6.11.2
+
+      - name: Prune Qt build tree.
+        if: steps.cache-qt.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          find "$LibrariesPath" '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' ')' -type f ')' -o -empty ')' -delete
+          mkdir -p "$LibrariesPath/qt_6.11.2"
+
+      - name: Save Qt cache.
+        if: steps.cache-qt.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: ${{ runner.OS }}-x64-qt6-v3-${{ env.CACHE_KEY }}
+
+  libs-owt:
+    name: Libraries (WebRTC / tg_owt)
+    runs-on: windows-latest
+    env:
+      PREPARE_PATH: "Telegram/build/prepare/prepare.py"
+    defaults:
+      run:
+        shell: cmd
+    steps:
+      - name: Prepare directories.
+        run: |
+          mkdir %userprofile%\TBuild\Libraries
+          mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
+          echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
+          echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
+
+      - name: Get repository name.
+        shell: bash
+        run: echo "REPO_NAME=${GITHUB_REPOSITORY##*/}" >> "$GITHUB_ENV"
+
+      - name: Clone (shallow, no submodules needed for libraries).
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+          path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
+
+      - name: First set up.
+        shell: bash
+        run: |
+          DOCPATH=$TBUILD/$REPO_NAME/docs/building-win.md
+          SDK="$(grep "SDK version" "$DOCPATH" | sed -r 's/.*\*\*(.*)\*\* SDK version.*/\1/')"
+          echo "SDK=$SDK" >> "$GITHUB_ENV"
+
+          sed -i '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/${_Zi}//;s/\/RTC1//' "$PROGRAMFILES"/CMake/share/cmake*/Modules/Platform/Windows-MSVC.cmake
+
+          echo "$(sha256sum "$TBUILD/$REPO_NAME/$PREPARE_PATH" | awk '{ print $1 }')" >> CACHE_KEY.txt
+          echo "$SDK" >> CACHE_KEY.txt
+          echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> "$GITHUB_ENV"
+
+          sed -i 's/mingw-w64-x86_64-diffutils/diffutils/' "$TBUILD/$REPO_NAME/$PREPARE_PATH"
+
+          git config --global user.email "you@example.com"
+          git config --global user.name "Sample"
+
+      - uses: Eden-CI/msvc-dev-cmd@master
+        name: Native Tools Command Prompt.
+        with:
+          arch: x64
+          sdk: ${{ env.SDK }}
+          toolset: '14.44'
+
+      - name: NuGet sources.
+        run: |
+          nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
+          nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
+
+      - name: Restore tg_owt cache.
+        id: cache-owt
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\tg_owt
+            ${{ env.LibrariesPath }}\cache_keys\tg_owt
+          key: ${{ runner.OS }}-x64-owt-v3-${{ env.CACHE_KEY }}
+
+      - name: Build tg_owt.
+        if: steps.cache-owt.outputs.cache-hit != 'true'
+        run: |
+          %TBUILD%\%REPO_NAME%\Telegram\build\prepare\win.bat skip-release silent qt6 patches msys64 python NuGet jom zlib mozjpeg openssl3 opus gas-preprocessor dav1d openh264 libvpx nv-codec-headers ffmpeg tg_owt
+
+      - name: Prune tg_owt build tree.
+        if: steps.cache-owt.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          find "$LibrariesPath" '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' ')' -type f ')' -o -empty ')' -delete
+
+      - name: Save tg_owt cache.
+        if: steps.cache-owt.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\tg_owt
+            ${{ env.LibrariesPath }}\cache_keys\tg_owt
+          key: ${{ runner.OS }}-x64-owt-v3-${{ env.CACHE_KEY }}
+
+  libs-core:
+    name: Libraries (Core & Rust)
+    runs-on: windows-latest
+    env:
+      PREPARE_PATH: "Telegram/build/prepare/prepare.py"
+    defaults:
+      run:
+        shell: cmd
+    steps:
+      - name: Prepare directories.
+        run: |
+          mkdir %userprofile%\TBuild\Libraries
+          mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
+          echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
+          echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
+
+      - name: Get repository name.
+        shell: bash
+        run: echo "REPO_NAME=${GITHUB_REPOSITORY##*/}" >> "$GITHUB_ENV"
+
+      - name: Clone (shallow, no submodules needed for libraries).
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+          path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
+
+      - name: First set up.
+        shell: bash
+        run: |
+          DOCPATH=$TBUILD/$REPO_NAME/docs/building-win.md
+          SDK="$(grep "SDK version" "$DOCPATH" | sed -r 's/.*\*\*(.*)\*\* SDK version.*/\1/')"
+          echo "SDK=$SDK" >> "$GITHUB_ENV"
+
+          sed -i '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/${_Zi}//;s/\/RTC1//' "$PROGRAMFILES"/CMake/share/cmake*/Modules/Platform/Windows-MSVC.cmake
+
+          echo "$(sha256sum "$TBUILD/$REPO_NAME/$PREPARE_PATH" | awk '{ print $1 }')" >> CACHE_KEY.txt
+          echo "$SDK" >> CACHE_KEY.txt
+          echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> "$GITHUB_ENV"
+
+          sed -i 's/mingw-w64-x86_64-diffutils/diffutils/' "$TBUILD/$REPO_NAME/$PREPARE_PATH"
+          sed -i -E -e '/windows.+dump_syms/d' -e '/dump_syms\.(gyp|vcxproj)/d' "$TBUILD/$REPO_NAME/$PREPARE_PATH"
+
+          git config --global user.email "you@example.com"
+          git config --global user.name "Sample"
+
+      - uses: Eden-CI/msvc-dev-cmd@master
+        name: Native Tools Command Prompt.
+        with:
+          arch: x64
+          sdk: ${{ env.SDK }}
+          toolset: '14.44'
+
+      - name: NuGet sources.
+        run: |
+          nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
+          nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
+
+      - name: Restore ThirdParty cache.
+        id: cache-third-party
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.TBUILD }}\ThirdParty
+          key: ${{ runner.OS }}-x64-third-party-v3-${{ env.CACHE_KEY }}
+
+      - name: Restore Libraries cache.
+        id: cache-libs
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\*
+            !${{ env.LibrariesPath }}\cache_keys
+            !${{ env.LibrariesPath }}\[qQ]t[_-]*
+            !${{ env.LibrariesPath }}\tg_owt
+            ${{ env.LibrariesPath }}\cache_keys\*
+            !${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+            !${{ env.LibrariesPath }}\cache_keys\tg_owt
+          key: ${{ runner.OS }}-x64-libs-v3-${{ env.CACHE_KEY }}
+
+      - name: Build Core Libraries.
+        if: steps.cache-libs.outputs.cache-hit != 'true' || steps.cache-third-party.outputs.cache-hit != 'true'
+        run: |
+          %TBUILD%\%REPO_NAME%\Telegram\build\prepare\win.bat skip-release silent qt6 patches msys64 python NuGet jom gyp rust lzma zlib mozjpeg openssl3 opus rnnoise gas-preprocessor dav1d openh264 libavif libwebp libjxl libvpx liblcms2 nv-codec-headers regex ffmpeg libheif openal-soft breakpad ada tde2e tlottie wallet-engine tdesktop_rust
+
+      - name: Save ThirdParty cache.
+        if: steps.cache-third-party.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.TBUILD }}\ThirdParty
+          key: ${{ runner.OS }}-x64-third-party-v3-${{ env.CACHE_KEY }}
+
+      - name: Prune Core Libraries build tree.
+        if: steps.cache-libs.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          find "$LibrariesPath" '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/wallet_engine/*' -o '(' '(' -path '*/tlottie/*' -o -path '*/wallet-engine/*' -o -path '*/tdesktop_rust/*' ')' ! -path '*/target/*' ')' -o -path '*/nv-codec-headers/*' ')' -type f ')' -o -empty ')' -delete
+
+      - name: Save Libraries cache.
+        if: steps.cache-libs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\*
+            !${{ env.LibrariesPath }}\cache_keys
+            !${{ env.LibrariesPath }}\[qQ]t[_-]*
+            !${{ env.LibrariesPath }}\tg_owt
+            ${{ env.LibrariesPath }}\cache_keys\*
+            !${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+            !${{ env.LibrariesPath }}\cache_keys\tg_owt
+          key: ${{ runner.OS }}-x64-libs-v3-${{ env.CACHE_KEY }}
+
+  build:
+    name: Build MixinGram (.exe)
+    needs: [libs-qt, libs-owt, libs-core]
+    runs-on: windows-latest
+    env:
+      PREPARE_PATH: "Telegram/build/prepare/prepare.py"
+    defaults:
+      run:
+        shell: cmd
+    steps:
+      - name: Free runner disk space.
+        shell: pwsh
+        run: |
+          Get-PSDrive C | Format-Table Name, Used, Free
+          $unused = @(
+            'C:\Android',
+            'C:\Program Files (x86)\Android',
+            'C:\Program Files\dotnet',
+            'C:\hostedtoolcache\windows\CodeQL',
+            'C:\hostedtoolcache\windows\Java_Temurin-Hotspot_jdk',
+            'C:\ghcup'
+          )
+          foreach ($path in $unused) {
+            if (Test-Path $path) {
+              cmd /c "rmdir /s /q `"$path`""
+            }
+          }
+          Get-PSDrive C | Format-Table Name, Used, Free
+
+      - name: Enlarge the pagefile.
+        uses: al-cheb/configure-pagefile-action@v1.5
+        with:
+          minimum-size: 16GB
+          maximum-size: 32GB
+          disk-root: 'D:'
+
+      - name: Prepare directories.
+        run: |
+          mkdir %userprofile%\TBuild\Libraries
+          mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
+          echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
+          echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
+
+      - name: Get repository name.
+        shell: bash
+        run: echo "REPO_NAME=${GITHUB_REPOSITORY##*/}" >> "$GITHUB_ENV"
 
       - name: Clone.
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
+          fetch-depth: 1
           submodules: recursive
           path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
 
@@ -88,163 +369,106 @@ jobs:
         shell: bash
         run: |
           DOCPATH=$TBUILD/$REPO_NAME/docs/building-win.md
-          SDK="$(grep "SDK version" $DOCPATH | sed -r 's/.*\*\*(.*)\*\* SDK version.*/\1/')"
-          echo "SDK=$SDK" >> $GITHUB_ENV
+          SDK="$(grep "SDK version" "$DOCPATH" | sed -r 's/.*\*\*(.*)\*\* SDK version.*/\1/')"
+          echo "SDK=$SDK" >> "$GITHUB_ENV"
 
-          sed -i '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/${_Zi}//' "$PROGRAMFILES"/CMake/share/cmake*/Modules/Platform/Windows-MSVC.cmake
+          sed -i '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/${_Zi}//;s/\/RTC1//' "$PROGRAMFILES"/CMake/share/cmake*/Modules/Platform/Windows-MSVC.cmake
 
-          echo "$(sha256sum $TBUILD/$REPO_NAME/$PREPARE_PATH | awk '{ print $1 }')" >> CACHE_KEY.txt
+          echo "$(sha256sum "$TBUILD/$REPO_NAME/$PREPARE_PATH" | awk '{ print $1 }')" >> CACHE_KEY.txt
           echo "$SDK" >> CACHE_KEY.txt
-          echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> $GITHUB_ENV
+          echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> "$GITHUB_ENV"
 
-          echo "Configurate git for cherry-picks."
           git config --global user.email "you@example.com"
           git config --global user.name "Sample"
-
-      - name: Install VS 2026 Build Tools.
-        if: matrix.arch == 'arm64'
-        shell: pwsh
-        run: |
-          $exe = Join-Path $env:RUNNER_TEMP 'vs_buildtools.exe'
-          Invoke-WebRequest -Uri https://aka.ms/vs/18/stable/vs_buildtools.exe -OutFile $exe
-          $p = Start-Process -FilePath $exe -Wait -PassThru -ArgumentList `
-            '--quiet','--wait','--norestart','--nocache', `
-            '--add','Microsoft.VisualStudio.Workload.VCTools', `
-            '--add','Microsoft.VisualStudio.Component.VC.Tools.ARM64', `
-            '--add','Microsoft.VisualStudio.Component.VC.ATL.ARM64'
-          Remove-Item $exe -Force -ErrorAction SilentlyContinue
-          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { exit $p.ExitCode }
 
       - uses: Eden-CI/msvc-dev-cmd@master
         name: Native Tools Command Prompt.
         with:
-          arch: ${{ matrix.arch }}
+          arch: x64
           sdk: ${{ env.SDK }}
-          toolset: ${{ case(matrix.arch == 'arm64', '', '14.44') }}
+          toolset: '14.44'
 
-      - name: NuGet sources.
-        run: |
-          nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
-          nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
-
-      - name: ThirdParty cache.
-        id: cache-third-party
-        uses: actions/cache@v6
+      - name: Restore ThirdParty cache.
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.TBUILD }}\ThirdParty
-          key: ${{ runner.OS }}-${{ runner.arch }}-third-party-${{ env.CACHE_KEY }}
-          restore-keys: ${{ runner.OS }}-${{ runner.arch }}-third-party-
-          save-always: true
+          key: ${{ runner.OS }}-x64-third-party-v3-${{ env.CACHE_KEY }}
 
-      - name: Libraries cache.
-        id: cache-libs
-        uses: actions/cache@v6
+      - name: Restore Libraries cache.
+        uses: actions/cache/restore@v4
         with:
           path: |
             ${{ env.LibrariesPath }}\*
             !${{ env.LibrariesPath }}\cache_keys
             !${{ env.LibrariesPath }}\[qQ]t[_-]*
+            !${{ env.LibrariesPath }}\tg_owt
             ${{ env.LibrariesPath }}\cache_keys\*
             !${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
-          key: ${{ runner.OS }}-${{ matrix.arch }}-libs-v2-${{ env.CACHE_KEY }}
-          restore-keys: ${{ runner.OS }}-${{ matrix.arch }}-libs-v2-
-          save-always: true
+            !${{ env.LibrariesPath }}\cache_keys\tg_owt
+          key: ${{ runner.OS }}-x64-libs-v3-${{ env.CACHE_KEY }}
 
-      - name: Qt cache.
-        id: cache-qt
-        uses: actions/cache@v6
+      - name: Restore Qt cache.
+        uses: actions/cache/restore@v4
         with:
           path: |
             ${{ env.LibrariesPath }}\[qQ]t[_-]*
             ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
-          key: ${{ runner.OS }}-${{ matrix.arch }}-${{ matrix.qt || 'qt' }}-${{ env.CACHE_KEY }}
-          restore-keys: ${{ runner.OS }}-${{ matrix.arch }}-${{ matrix.qt || 'qt' }}-
-          save-always: true
+          key: ${{ runner.OS }}-x64-qt6-v3-${{ env.CACHE_KEY }}
 
-      - name: Libraries.
+      - name: Restore tg_owt cache.
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\tg_owt
+            ${{ env.LibrariesPath }}\cache_keys\tg_owt
+          key: ${{ runner.OS }}-x64-owt-v3-${{ env.CACHE_KEY }}
+
+      - name: Provide the zlib names that the Qt package expects.
         run: |
-          %TBUILD%\%REPO_NAME%\Telegram\build\prepare\win.bat skip-release silent ${{ matrix.qt }}
+          if exist "%LibrariesPath%\zlib\Debug\libzsd.lib" copy /Y "%LibrariesPath%\zlib\Debug\libzsd.lib" "%LibrariesPath%\zlib\Debug\zlibstaticd.lib"
+          if exist "%LibrariesPath%\zlib\Release\libzs.lib" copy /Y "%LibrariesPath%\zlib\Release\libzs.lib" "%LibrariesPath%\zlib\Release\zlibstatic.lib"
+          exit /b 0
 
-      - name: Read configuration matrix.
-        shell: bash
-        run: |
-          ARTIFACT_NAME="Telegram"
-
-          ARCH=""
-          if [ -n "${{ matrix.arch }}" ]; then
-            case "${{ matrix.arch }}" in
-              x64_x86) ARCH="x86";;
-              arm64) ARCH="arm";;
-              *) ARCH="${{ matrix.arch }}";;
-            esac
-            echo "Architecture from matrix: $ARCH"
-            ARTIFACT_NAME="${ARTIFACT_NAME} ${{ matrix.arch }}"
-          fi
-
-          if [ -n "${{ matrix.qt }}" ]; then
-            ARTIFACT_NAME="${ARTIFACT_NAME} ${{ matrix.qt }}"
-          fi
-
-          GENERATOR=""
-          if [ -n "${{ matrix.generator }}" ]; then
-            GENERATOR="-G \"${{ matrix.generator }}\""
-            echo "Generator from matrix: $GENERATOR"
-            ARTIFACT_NAME="${ARTIFACT_NAME} ${{ matrix.generator }}"
-          fi
-          echo "TDESKTOP_BUILD_GENERATOR=$GENERATOR" >> $GITHUB_ENV
-
-          [ -n "$GENERATOR" ] && ARCH=""
-          echo "TDESKTOP_BUILD_ARCH=$ARCH" >> $GITHUB_ENV
-
-          DEFINE=""
-          if [ -n "${{ matrix.defines }}" ]; then
-            DEFINE="-D ${{ matrix.defines }}=ON"
-            echo "Define from matrix: $DEFINE"
-            ARTIFACT_NAME="${ARTIFACT_NAME} ${{ matrix.defines }}"
-          fi
-          echo "TDESKTOP_BUILD_DEFINE=$DEFINE" >> $GITHUB_ENV
-
-          echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
-
-          API_ID="${{ secrets.API_ID || '611335' }}"
-          API_HASH="${{ secrets.API_HASH || 'd524b414d21f4d37f08684c1df41ac9c' }}"
-          API="-D TDESKTOP_API_ID=${API_ID} -D TDESKTOP_API_HASH=${API_HASH}"
-          echo "TDESKTOP_BUILD_API=$API" >> $GITHUB_ENV
-
-      - name: Free up some disk space.
-        shell: bash
-        run: find $LibrariesPath '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.cpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/src/*' -o -path '*/tdesktop_rust/out/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' ')' -type f ')' -o -empty ')' -delete
-
-      - name: Telegram Desktop build.
-        if: env.ONLY_CACHE == 'false'
+      - name: Configure Telegram Desktop.
         run: |
           cd %TBUILD%\%REPO_NAME%\Telegram
 
           call configure.bat ^
-          %TDESKTOP_BUILD_GENERATOR% ^
-          %TDESKTOP_BUILD_ARCH% ^
-          ${{ matrix.qt }} ^
-          %TDESKTOP_BUILD_API% ^
+          -G "Ninja Multi-Config" ^
+          qt6 ^
+          -D TDESKTOP_API_ID=611335 ^
+          -D TDESKTOP_API_HASH=d524b414d21f4d37f08684c1df41ac9c ^
           -D CMAKE_CONFIGURATION_TYPES=Debug ^
           -D CMAKE_COMPILE_WARNING_AS_ERROR=OFF ^
           -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= ^
           -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
-          -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON ^
-          %TDESKTOP_BUILD_DEFINE%
+          -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
 
+      - name: Fast verify MixinGram custom files.
+        run: |
+          cd %TBUILD%\%REPO_NAME%\Telegram
+          cmake --build ..\out --config Debug --parallel --target ^
+            Telegram/CMakeFiles/td_ui.dir/Debug/SourceFiles/settings/settings_common.cpp.obj ^
+            Telegram/CMakeFiles/Telegram.dir/Debug/SourceFiles/settings/sections/settings_mixingram.cpp.obj ^
+            Telegram/CMakeFiles/Telegram.dir/Debug/SourceFiles/settings/sections/settings_main.cpp.obj ^
+            Telegram/CMakeFiles/Telegram.dir/Debug/SourceFiles/window/themes/window_theme.cpp.obj ^
+            Telegram/CMakeFiles/Telegram.dir/Debug/SourceFiles/window/section_widget.cpp.obj
+
+      - name: Build Telegram.exe.
+        run: |
+          cd %TBUILD%\%REPO_NAME%\Telegram
           cmake --build ..\out --config Debug --parallel
 
       - name: Move artifact.
-        if: (env.UPLOAD_ARTIFACT == 'true') || (github.ref == 'refs/heads/nightly')
         run: |
           set OUT=%TBUILD%\%REPO_NAME%\out\Debug
           mkdir artifact
-          move %OUT%\Telegram.exe artifact/
-          if exist %OUT%\Updater.exe move %OUT%\Updater.exe artifact/
-      - uses: actions/upload-artifact@v7
+          move %OUT%\Telegram.exe artifact\
+          if exist %OUT%\Updater.exe move %OUT%\Updater.exe artifact\
+
+      - uses: actions/upload-artifact@v4
         name: Upload artifact.
-        if: (env.UPLOAD_ARTIFACT == 'true') || (github.ref == 'refs/heads/nightly')
         with:
-          name: ${{ env.ARTIFACT_NAME }}
+          name: MixinGram-win64-portable
           path: artifact\
-          retention-days: 1
+          retention-days: 7
